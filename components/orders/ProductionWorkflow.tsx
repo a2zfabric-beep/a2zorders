@@ -89,32 +89,42 @@ export default function ProductionWorkflow({ order }: { order: any }) {
     saveWorkflow(newStages);
   };
 
-  // --- NEW WATERFALL RESET LOGIC ---
+  // --- STRICT WATERFALL RESET LOGIC ---
   const canReset = (id: number) => {
-    if (id === 5) return stages[5].status !== 'pending';
-    // Logic: Can only reset if the NEXT stage is still pending
-    const nextStage = stages[id + 1];
-    return nextStage.status === 'pending';
+    // Current stage must not be pending to even bother resetting
+    if (stages[id].status === 'pending') return false;
+    
+    // If it's the last stage, we can reset it as long as it's not pending
+    if (id === 5) return true;
+
+    // Logic: An earlier stage can ONLY be reset if the IMMEDIATE next stage is 'pending'
+    // This forces the user to reset from the bottom up (Waterfall)
+    return stages[id + 1].status === 'pending';
   };
 
   const handleReset = (id: number) => {
     if (!canReset(id)) {
-      alert(`Cannot reset Stage ${id}. You must reset Stage ${id + 1} first to maintain the production timeline.`);
+      alert(`Common Sense Logic: You cannot reset Stage ${id} because Stage ${id + 1} is already active. Reset Stage ${id + 1} first.`);
       return;
     }
     
     const newStages = { ...stages };
-    // Clear current stage
+    
+    // Reset Current Stage
     newStages[id] = {
       ...newStages[id],
       status: 'pending',
       actualDate: null,
-      mode: id === 1 ? null : undefined // Mode only exists in Stage 1
+      poConfirmed: false,
+      mode: id === 1 ? null : undefined
     };
 
-    // Clear the Start Date of the next stage since the dependency is reset
+    // Important: Clear the startDate of the next stage to prevent phantom time tracking
     if (id < 5) {
-      newStages[id + 1] = { ...newStages[id + 1], startDate: null };
+      newStages[id + 1] = {
+        ...newStages[id + 1],
+        startDate: null
+      };
     }
 
     setStages(newStages);
@@ -153,7 +163,7 @@ export default function ProductionWorkflow({ order }: { order: any }) {
       </div>
 
       <div className="space-y-4 no-print">
-        {/* STAGE 1 */}
+        {/* STAGE 1: FABRIC */}
         <StageCard 
           title="Fabric Procurement" 
           icon={<Truck size={20}/>} 
@@ -174,17 +184,17 @@ export default function ProductionWorkflow({ order }: { order: any }) {
                   <thead className="font-black text-gray-400 uppercase"><tr><th className="pb-2">Fabric</th><th className="pb-2">Color</th><th className="pb-2">Qty</th>{stages[1].mode === 'vendor' && <th className="pb-2">Vendor</th>}</tr></thead>
                   <tbody>
                     {fabricRows.map((f, i) => (
-                      <tr key={i} className="border-t border-gray-50"><td className="py-3 font-bold">{f.fabric}</td><td className="font-bold">{f.color}</td><td className="font-bold">{f.qty}</td>{stages[1].mode === 'vendor' && <td><input className="p-1 border rounded w-full" value={f.vendor} onChange={e => {const r=[...fabricRows]; r[i].vendor=e.target.value; setFabricRows(r)}} /></td>}</tr>
+                      <tr key={i} className="border-t border-gray-50"><td className="py-3 font-bold">{f.fabric}</td><td className="font-bold">{f.color}</td><td className="font-bold">{f.qty}</td>{stages[1].mode === 'vendor' && <td><input className="p-1 border rounded w-full text-[10px] font-bold" value={f.vendor} onChange={e => {const r=[...fabricRows]; r[i].vendor=e.target.value; setFabricRows(r)}} /></td>}</tr>
                     ))}
                   </tbody>
                 </table>
-                <div className="flex justify-between border-t pt-4">
+                <div className="flex justify-between border-t pt-4 items-center">
                     <button 
                       onClick={() => handleReset(1)} 
                       disabled={!canReset(1)}
-                      className={`flex items-center gap-2 text-[10px] uppercase font-bold underline ${!canReset(1) ? 'text-gray-200 cursor-not-allowed' : 'text-gray-400 hover:text-red-500'}`}
+                      className={`flex items-center gap-2 text-[10px] uppercase font-black underline transition-colors ${!canReset(1) ? 'text-gray-200 cursor-not-allowed' : 'text-gray-400 hover:text-red-600'}`}
                     >
-                      <RotateCcw size={12}/> Reset Stage
+                      <RotateCcw size={12}/> Reset Stage 1
                     </button>
                     <button onClick={() => handleStageUpdate(1, { status: 'completed', actualDate: new Date().toISOString() })} className="px-8 py-3 bg-emerald-600 text-white rounded-xl font-black uppercase text-[10px]">Complete Stage</button>
                 </div>
@@ -193,7 +203,7 @@ export default function ProductionWorkflow({ order }: { order: any }) {
           </div>
         </StageCard>
 
-        {/* STAGES 2, 3, 4 */}
+        {/* STAGES 2, 3, 4: TECHNICAL STAGES */}
         {[
           { id: 2, name: 'Dyeing Stage', icon: <Palette size={20}/>, label: 'Dyeing Technique' },
           { id: 3, name: 'Printing Stage', icon: <Printer size={20}/>, label: 'Print Technique' },
@@ -202,6 +212,7 @@ export default function ProductionWorkflow({ order }: { order: any }) {
           <StageCard key={s.id} title={s.name} icon={s.icon} stage={stages[s.id]} expanded={expandedStage === s.id} onToggle={() => !isLocked(s.id) && setExpandedStage(expandedStage === s.id ? null : s.id)} locked={isLocked(s.id)}>
               <div className="space-y-6">
                 <div className="flex items-end gap-4"><label className="text-[10px] font-black text-gray-400 uppercase block mb-1">Budget Days</label><input type="number" className="w-24 p-3 bg-gray-50 border border-gray-200 rounded-xl font-black text-sm" value={stages[s.id].assignedDays} onChange={(e) => handleStageUpdate(s.id, { assignedDays: Number(e.target.value) })}/></div>
+                
                 {stages[s.id].status === 'pending' ? (
                   <div className="flex gap-4">
                     <button onClick={() => handleStageUpdate(s.id, { status: 'na' })} className="flex-1 py-5 border-2 text-gray-400 border-gray-100 rounded-2xl font-black uppercase text-xs">Not Required</button>
@@ -212,8 +223,8 @@ export default function ProductionWorkflow({ order }: { order: any }) {
                     {stageConfigs[s.id]?.map((config, idx) => (
                       <div key={idx} className="grid grid-cols-3 gap-4 text-[10px] items-end border-b pb-2">
                         <div className="font-bold">STYLE: {config.item_number}</div>
-                        <div><label className="text-gray-400 uppercase mb-1 block">{s.label}</label><input className="w-full p-2 bg-gray-50 rounded border" value={config.technique} onChange={e => {const c=[...stageConfigs[s.id]]; c[idx].technique=e.target.value; setStageConfigs({...stageConfigs, [s.id]: c})}} /></div>
-                        <div><label className="text-gray-400 uppercase mb-1 block">Vendor</label><input className="w-full p-2 bg-gray-50 rounded border" value={config.vendor} onChange={e => {const c=[...stageConfigs[s.id]]; c[idx].vendor=e.target.value; setStageConfigs({...stageConfigs, [s.id]: c})}} /></div>
+                        <div><label className="text-gray-400 uppercase mb-1 block">{s.label}</label><input className="w-full p-2 bg-gray-50 rounded border font-bold" value={config.technique} onChange={e => {const c=[...stageConfigs[s.id]]; c[idx].technique=e.target.value; setStageConfigs({...stageConfigs, [s.id]: c})}} /></div>
+                        <div><label className="text-gray-400 uppercase mb-1 block">Vendor</label><input className="w-full p-2 bg-gray-50 rounded border font-bold" value={config.vendor} onChange={e => {const c=[...stageConfigs[s.id]]; c[idx].vendor=e.target.value; setStageConfigs({...stageConfigs, [s.id]: c})}} /></div>
                       </div>
                     ))}
                     <div className="flex justify-between items-center pt-4">
@@ -222,12 +233,12 @@ export default function ProductionWorkflow({ order }: { order: any }) {
                           <button 
                             onClick={() => handleReset(s.id)} 
                             disabled={!canReset(s.id)}
-                            className={`text-[10px] uppercase font-bold underline ${!canReset(s.id) ? 'text-gray-200 cursor-not-allowed' : 'text-gray-400 hover:text-red-500'}`}
+                            className={`flex items-center gap-1 text-[10px] uppercase font-black underline transition-colors ${!canReset(s.id) ? 'text-gray-200 cursor-not-allowed' : 'text-gray-400 hover:text-red-600'}`}
                           >
-                            Reset
+                            <RotateCcw size={10}/> Reset
                           </button>
                         </div>
-                        <button onClick={() => handleStageUpdate(s.id, { status: 'completed', actualDate: new Date().toISOString() })} className="px-8 py-3 bg-emerald-600 text-white rounded-xl font-black uppercase text-[10px]">Complete</button>
+                        <button onClick={() => handleStageUpdate(s.id, { status: 'completed', actualDate: new Date().toISOString() })} className="px-8 py-3 bg-emerald-600 text-white rounded-xl font-black uppercase text-[10px]">Complete Stage</button>
                     </div>
                   </div>
                 )}
@@ -235,7 +246,7 @@ export default function ProductionWorkflow({ order }: { order: any }) {
           </StageCard>
         ))}
 
-        {/* STAGE 5 */}
+        {/* STAGE 5: SAMPLING */}
         <StageCard 
           title="Pattern & Sampling" 
           icon={<Scissors size={20}/>} 
@@ -245,36 +256,45 @@ export default function ProductionWorkflow({ order }: { order: any }) {
           locked={isLocked(5)}
         >
           <div className="space-y-6">
-            <input type="number" className="w-24 p-3 bg-gray-50 border border-gray-200 rounded-xl font-black text-sm" value={stages[5].assignedDays} onChange={(e) => handleStageUpdate(5, { assignedDays: Number(e.target.value) })}/>
+            <div className="flex items-end gap-4"><label className="text-[10px] font-black text-gray-400 uppercase block mb-1">Budget Days</label><input type="number" className="w-24 p-3 bg-gray-50 border border-gray-200 rounded-xl font-black text-sm" value={stages[5].assignedDays} onChange={(e) => handleStageUpdate(5, { assignedDays: Number(e.target.value) })}/></div>
             <table className="w-full text-left text-xs">
-                <thead><tr className="text-gray-400 uppercase font-black"><th>Style</th><th>Notes</th><th className="text-right">Done</th></tr></thead>
+                <thead><tr className="text-gray-400 uppercase font-black"><th>Style</th><th>Production Notes</th><th className="text-right">Status</th></tr></thead>
                 <tbody>
                 {samplingStyles.map((style, i) => (
                     <tr key={i} className="border-t">
                     <td className="py-4 font-bold">{style.item_number}</td>
-                    <td><input className="w-full p-2 bg-gray-50 rounded border" value={style.notes} onChange={e => {const r=[...samplingStyles]; r[i].notes=e.target.value; setSamplingStyles(r)}} /></td>
-                    <td className="text-right"><button onClick={() => {const r = [...samplingStyles]; r[i].isDone = !r[i].isDone; setSamplingStyles(r)}} className={`p-2 rounded-lg ${style.isDone ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-400'}`}><Check size={16}/></button></td>
+                    <td><input className="w-full p-2 bg-gray-50 rounded border text-[10px] font-bold" value={style.notes} onChange={e => {const r=[...samplingStyles]; r[i].notes=e.target.value; setSamplingStyles(r)}} /></td>
+                    <td className="text-right"><button onClick={() => {const r = [...samplingStyles]; r[i].isDone = !r[i].isDone; setSamplingStyles(r)}} className={`p-2 rounded-lg transition-all ${style.isDone ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-400'}`}><Check size={16}/></button></td>
                     </tr>
                 ))}
                 </tbody>
             </table>
-            <div className="flex flex-col gap-3">
-              <button onClick={() => handleStageUpdate(5, { status: 'completed', actualDate: new Date().toISOString() })} className="w-full py-4 bg-emerald-600 text-white rounded-xl font-black uppercase text-xs shadow-xl">Finish Order</button>
+            <div className="flex flex-col gap-3 pt-4 border-t">
+              <button 
+                onClick={() => handleStageUpdate(5, { status: 'completed', actualDate: new Date().toISOString() })} 
+                className="w-full py-4 bg-emerald-600 text-white rounded-xl font-black uppercase text-xs shadow-xl active:scale-[0.98] transition-transform"
+              >
+                Finish Production Order
+              </button>
               <button 
                 onClick={() => handleReset(5)} 
-                className="text-[10px] uppercase font-bold text-gray-400 underline text-center"
+                disabled={!canReset(5)}
+                className={`flex items-center justify-center gap-2 text-[10px] uppercase font-black underline p-2 ${!canReset(5) ? 'text-gray-200 cursor-not-allowed' : 'text-gray-400 hover:text-red-600'}`}
               >
-                Reset Sampling Stage
+                <RotateCcw size={12}/> Reset Sampling Stage
               </button>
             </div>
           </div>
         </StageCard>
       </div>
 
-      {/* PRINT VIEW (PRESERVED) */}
+      {/* HIDDEN PRINT SECTION */}
       <div className="hidden print:block p-10 bg-white">
           <h1 className="text-2xl font-black uppercase border-b-4 border-black mb-4">{activePrintStage?.title}</h1>
-          <p className="font-bold">ORDER: #{order.order_id}</p>
+          <p className="font-bold mb-8 text-xl">ORDER REF: #{order.order_id}</p>
+          <div className="mt-10 p-4 border-2 border-black">
+             <p className="text-sm font-bold uppercase tracking-widest">Internal Production Sheet - Authorized Use Only</p>
+          </div>
       </div>
     </div>
   );
@@ -291,14 +311,17 @@ function StageCard({ title, icon, stage, expanded, onToggle, locked = false, chi
       <div onClick={onToggle} className={`px-8 py-6 flex items-center justify-between ${locked ? '' : 'cursor-pointer group'}`}>
         <div className="flex items-center gap-5">
           <div className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${locked ? 'bg-gray-200 text-gray-400' : isDelayed ? 'bg-red-500 text-white animate-pulse' : stage.status === 'completed' ? 'bg-emerald-500 text-white shadow-lg' : 'bg-blue-50 text-blue-600'}`}>{locked ? <Lock size={20}/> : isDelayed ? <AlertCircle size={24}/> : stage.status === 'completed' ? <CheckCircle2 size={24}/> : icon}</div>
-          <div><h3 className={`text-base font-black uppercase tracking-widest ${locked ? 'text-gray-300' : 'text-gray-900'}`}>{title}</h3>
-            <div className="flex gap-4 mt-1 items-center">
-              <span className={`text-[10px] font-black uppercase ${stage.status === 'completed' ? 'text-emerald-500' : 'text-blue-600'}`}>
-                {stage.status === 'na' ? 'Not Required' : stage.status.replace('_', ' ')}
-              </span>
-              <div className="h-1 w-1 bg-gray-300 rounded-full"></div>
-              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-tighter">Allocated: {stage.assignedDays}d • Used: {spent}d</span>
-            </div>
+          <div>
+            <h3 className={`text-base font-black uppercase tracking-widest ${locked ? 'text-gray-300' : 'text-gray-900'}`}>{title}</h3>
+            {!locked && (
+              <div className="flex gap-4 mt-1 items-center">
+                <span className={`text-[10px] font-black uppercase ${stage.status === 'completed' ? 'text-emerald-500' : 'text-blue-600'}`}>
+                  {stage.status === 'na' ? 'Not Required' : stage.status.replace('_', ' ')}
+                </span>
+                <div className="h-1 w-1 bg-gray-300 rounded-full"></div>
+                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-tighter">Allocated: {stage.assignedDays}d • Used: {spent}d</span>
+              </div>
+            )}
           </div>
         </div>
         {!locked && (expanded ? <ChevronUp size={24} className="text-blue-500"/> : <ChevronDown size={24} className="text-gray-300"/>)}
