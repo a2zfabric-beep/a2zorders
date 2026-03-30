@@ -174,8 +174,8 @@ export default function ProductionWorkflow({ order }: { order: any }) {
           <div className="space-y-6">
             {!stages[1].mode ? (
               <div className="flex gap-4">
-                <button onClick={() => handleStageUpdate(1, { mode: 'stock', status: 'in_progress' })} className="flex-1 py-5 bg-emerald-600 text-white rounded-2xl font-black uppercase text-xs">Existing Stock</button>
-                <button onClick={() => handleStageUpdate(1, { mode: 'vendor', status: 'in_progress' })} className="flex-1 py-5 bg-blue-600 text-white rounded-2xl font-black uppercase text-xs">Order From Vendor</button>
+                <button onClick={() => handleStageUpdate(1, { mode: 'stock', status: 'in_progress' })} className="flex-1 py-5 bg-emerald-600 text-white rounded-2xl font-black uppercase text-xs shadow-lg">Existing Stock</button>
+                <button onClick={() => handleStageUpdate(1, { mode: 'vendor', status: 'in_progress', poConfirmed: false })} className="flex-1 py-5 bg-blue-600 text-white rounded-2xl font-black uppercase text-xs shadow-lg">Order From Vendor</button>
               </div>
             ) : (
               <div className="space-y-6">
@@ -192,11 +192,30 @@ export default function ProductionWorkflow({ order }: { order: any }) {
                     <button 
                       onClick={() => handleReset(1)} 
                       disabled={!canReset(1)}
-                      className={`flex items-center gap-2 text-[10px] uppercase font-black underline transition-colors ${!canReset(1) ? 'text-gray-200 cursor-not-allowed' : 'text-gray-400 hover:text-red-600'}`}
+                      className={`flex items-center gap-2 text-[10px] uppercase font-black underline transition-colors ${!canReset(1) ? 'text-gray-200 cursor-not-allowed' : 'text-gray-400 hover:text-red-500'}`}
                     >
                       <RotateCcw size={12}/> Reset Stage 1
                     </button>
-                    <button onClick={() => handleStageUpdate(1, { status: 'completed', actualDate: new Date().toISOString() })} className="px-8 py-3 bg-emerald-600 text-white rounded-xl font-black uppercase text-[10px]">Complete Stage</button>
+                    
+                    <div className="flex gap-3">
+                      {stages[1].mode === 'vendor' && !stages[1].poConfirmed ? (
+                        <button 
+                          onClick={() => handleStageUpdate(1, { poConfirmed: true })} 
+                          className="px-8 py-3 bg-blue-600 text-white rounded-xl font-black uppercase text-[10px] shadow-lg"
+                        >
+                          Confirm & Create PO
+                        </button>
+                      ) : (
+                        <>
+                          {stages[1].mode === 'vendor' && (
+                            <button onClick={() => triggerPrint(1, 'Fabric Procurement PO')} className="px-6 py-3 border-2 border-blue-600 text-blue-600 rounded-xl font-black text-[10px] uppercase flex items-center gap-2">
+                              <Download size={14}/> Print PO
+                            </button>
+                          )}
+                          <button onClick={() => handleStageUpdate(1, { status: 'completed', actualDate: new Date().toISOString() })} className="px-8 py-3 bg-emerald-600 text-white rounded-xl font-black uppercase text-[10px] shadow-lg">Complete Stage</button>
+                        </>
+                      )}
+                    </div>
                 </div>
               </div>
             )}
