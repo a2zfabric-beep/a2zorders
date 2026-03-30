@@ -60,14 +60,20 @@ export async function POST(request: Request) {
           .not('status', 'in', '("dispatched", "ready")');
 
         const now = new Date();
-        const delayed = orders?.filter(o => o.delivery_date && new Date(o.delivery_date) < now) || [];
+        // Cast as any to bypass the array vs object type mismatch for the join
+        const delayed = (orders as any[])?.filter(o => o.delivery_date && new Date(o.delivery_date) < now) || [];
 
         let message = `⚠️ *DELAYED ORDERS (${delayed.length})*\n\n`;
         if (delayed.length === 0) {
           message = "✅ *All orders are currently on track!*";
         } else {
           delayed.forEach(o => {
-            message += `• \`${o.order_id}\` | ${o.client?.name || 'Unknown'}\n   📅 Target: ${new Date(o.delivery_date).toLocaleDateString()}\n\n`;
+            // Check if client is returned as an array (Supabase standard) or single object
+            const clientName = Array.isArray(o.client) 
+              ? o.client[0]?.name 
+              : o.client?.name;
+
+            message += `• \`${o.order_id}\` | ${clientName || 'Unknown'}\n   📅 Target: ${new Date(o.delivery_date).toLocaleDateString()}\n\n`;
           });
         }
 
@@ -78,7 +84,6 @@ export async function POST(request: Request) {
         });
         return NextResponse.json({ ok: true });
       }
-
       // PRESERVE: Handle "Hi" or any other non-command text
       if (!isCommand) {
         await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
