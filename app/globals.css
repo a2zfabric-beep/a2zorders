@@ -1,0 +1,225 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Only keep Material Symbols import here */
+/* Inter and Manrope are handled in layout.tsx via next/font/google */
+@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap');
+
+@layer base {
+  :root {
+    --background: #f5f6f8;
+    --foreground: #2c2f31;
+    --card: #ffffff;
+    --card-foreground: #2c2f31;
+    --popover: #ffffff;
+    --popover-foreground: #2c2f31;
+    --primary: #0253cd;
+    --primary-foreground: #f1f2ff;
+    --secondary: #4c5c76;
+    --secondary-foreground: #eef2ff;
+    --muted: #f5f6f8;
+    --muted-foreground: #595c5e;
+    --accent: #f5f6f8;
+    --accent-foreground: #2c2f31;
+    --destructive: #b31b25;
+    --destructive-foreground: #ffffff;
+    --border: #e2e8f0;
+    --input: #e2e8f0;
+    --ring: #0253cd;
+    --radius: 0.25rem;
+  }
+
+  .dark {
+    --background: #0f172a;
+    --foreground: #f8fafc;
+    --card: #1e293b;
+    --card-foreground: #f8fafc;
+    --popover: #1e293b;
+    --popover-foreground: #f8fafc;
+    --primary: #3b82f6;
+    --primary-foreground: #ffffff;
+    --secondary: #475569;
+    --secondary-foreground: #e2e8f0;
+    --muted: #1e293b;
+    --muted-foreground: #94a3b8;
+    --accent: #1e293b;
+    --accent-foreground: #f8fafc;
+    --destructive: #ef4444;
+    --destructive-foreground: #ffffff;
+    --border: #334155;
+    --input: #1e293b;
+    --ring: #3b82f6;
+  }
+
+  * {
+    border-color: var(--border);
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: 'Inter', sans-serif;
+  }
+
+  h1, h2, h3, .font-headline {
+    font-family: 'Manrope', sans-serif;
+  }
+
+  .material-symbols-outlined {
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+    font-family: 'Material Symbols Outlined';
+  }
+
+  .glass-nav {
+    background: rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(20px);
+  }
+
+  .dark .glass-nav {
+    background: rgba(12, 15, 16, 0.8);
+  }
+
+  .shadow-clinical {
+    box-shadow: 0px 12px 32px rgba(44, 47, 49, 0.06);
+  }
+
+  /* Hide scrollbar */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+@layer utilities {
+  /* Animation utilities */
+  .animate-fade-in {
+    animation: fadeIn 0.3s ease-in-out;
+  }
+
+  .animate-slide-up {
+    animation: slideUp 0.3s ease-out;
+  }
+
+  .animate-slide-down {
+    animation: slideDown 0.3s ease-out;
+  }
+
+  .animate-scale-in {
+    animation: scaleIn 0.2s ease-out;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes slideUp {
+    from {
+      transform: translateY(10px);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes slideDown {
+    from {
+      transform: translateY(-10px);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes scaleIn {
+    from {
+      transform: scale(0.95);
+      opacity: 0;
+    }
+    to {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+
+  /* Responsive utilities */
+  @media (max-width: 640px) {
+    .hide-mobile {
+      display: none;
+    }
+  }
+
+  @media (max-width: 768px) {
+    .hide-tablet {
+      display: none;
+    }
+  }
+
+  @media (max-width: 1024px) {
+    .hide-desktop {
+      display: none;
+    }
+  }
+
+  /* Dark mode transitions */
+  .dark-transition {
+    transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+  }
+}
+
+@media print {
+  /* Hide UI elements */
+  aside, nav, button, .no-print, .sticky {
+    display: none !important;
+  }
+
+  /* Reset layout for print */
+  main {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+  }
+
+  body {
+    background-color: white !important;
+    color: black !important;
+  }
+
+  /* Force headers and borders to show */
+  .bg-gray-100 {
+    background-color: #f3f4f6 !important;
+    -webkit-print-color-adjust: exact;
+  }
+  
+  .border, .border-b-2 {
+    border-color: #000 !important;
+  }
+
+  /* Professional spacing for PDF */
+  .max-w-7xl {
+    max-width: 100% !important;
+    padding: 0 !important;
+  }
+
+  /* Hide the "Management" and "Status" sidebars on the PDF */
+  .lg\:col-span-1, .space-y-6:has(select) {
+    display: none !important;
+  }
+  
+  .lg\:col-span-2 {
+    width: 100% !important;
+  }
+}
