@@ -23,13 +23,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ ok: true });
     }
 
-    // 2. Handle Text Messages & Commands
+    // 2. Handle Text Messages & Advanced Commands
     const text = body.message?.text;
     if (text) {
-      const isCommand = text.startsWith('/');
-      
-      // COMMAND: /stats - Quick Operations Summary
-      if (text === '/stats') {
+      const args = text.split(' ');
+      const command = args[0].toLowerCase();
+      const param = args[1]; // e.g. the Order ID
+
+      // COMMAND: /stats - Operations Overview
+      if (command === '/stats') {
         const { data: orders } = await supabase.from('sample_orders').select('status');
         const stats = orders?.reduce((acc: any, curr: any) => {
           acc[curr.status] = (acc[curr.status] || 0) + 1;
@@ -44,13 +46,136 @@ export async function POST(request: Request) {
           `📦 Ready: *${stats?.ready || 0}*\n` +
           `🚚 Dispatched: *${stats?.dispatched || 0}*`;
 
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-          chat_id: userId,
-          text: message,
-          parse_mode: 'Markdown'
-        });
+        await sendTelegram(userId, message);
         return NextResponse.json({ ok: true });
       }
+
+      // COMMAND: /list - Client-wise Order List
+      if (command === '/list') {
+        const { data: orders } = await supabase
+          .from('sample_orders')
+          .select('order_id, status, client:clients(name)')
+          .not('status', 'eq', 'dispatched');
+
+        if (!orders?.length) {
+          await sendTelegram(userId, "✅ *No active orders found.*");
+          return NextResponse.json({ ok: true });
+        }
+
+        // Group by Client
+        const grouped: Record<string, any[]> = {};
+        orders.forEach((o: any) => {
+          const name = Array.isArray(o.client) ? o.client[0]?.name : o.client?.name;
+          if (!grouped[name]) grouped[name] = [];
+          grouped[name].push(o);
+        });
+
+        let message = `📋 *Active Order Directory*\n\n`;
+        for (const [client, clientOrders] of Object.entries(grouped)) {
+          message += `👤 *${client}* (${clientOrders.length})\n`;
+          clientOrders.forEach(o => {
+            message += `└ \`/view ${o.order_id}\` — _${o.status.replace('_', ' ')}_\n`;
+          });
+          message += `\n`;
+        }
+
+        await sendTelegram(userId, message);
+        return NextResponse.json({ ok: true });
+      }
+
+      // COMMAND: /view [ID] - Technical Breakdown
+      if (command === '/view' && param) {
+        const { data: order } = await supabase
+          .from('sample_orders')
+          .select('*, client:clients(name), styles:order_styles(*)')
+          .eq('order_id', param.toUpperCase())
+          .single();
+
+        if (!order) {
+          await sendTelegram(userId, `❌ Order \`${param}\` not found.`);
+          return NextResponse.json({ ok: true });
+        }
+
+        const clientName = Array.isArray(order.client) ? order.client[0]?.name : order.client?.name;
+        
+        let message = `📦 *Order Detail: ${order.order_id}*\n`;
+        message += `👤 Client: *${clientName}*\n`;
+        message += `🏁 Status: *${order.status.toUpperCase()}*\n`;
+        message += `📅 Target: ${new Date(order.delivery_date).toLocaleDateString()}\n\n`;
+        
+        message += `👕 *Styles (${order.styles?.length || 0}):*\n`;
+        order.styles?.forEach((s: any) => {
+          message += `• ${s.item_number}: ${s.style_name} (${s.quantity}pcs)\n`;
+        });
+
+        message += `\n*Quick Actions:*\n`;
+        message += `/status_${order.order_id}_sampling\n`;
+        message += `/status_${order.order_id}_ready\n`;
+        message += `\n*Logistics:* \`/ship ${order.order_id} [Courier] [Tracking] [Date]\``;
+
+        await sendTelegram(userId, message);
+        return NextResponse.json({ ok: true });
+      }
+
+      // COMMAND: /status_[ID]_[STAGE] - Quick Status Move
+      if (command.startsWith('/status_')) {
+        const parts = command.split('_');
+        const orderId = parts[1].toUpperCase();
+        const newStatus = parts.slice(2).join('_');
+
+        const { error } = await supabase
+          .from('sample_orders')
+          .update({ status: newStatus })
+          .eq('order_id', orderId);
+
+        await sendTelegram(userId, error ? `❌ Update failed` : `✅ *${orderId}* moved to *${newStatus}*`);
+        return NextResponse.json({ ok: true });
+      }
+
+      // COMMAND: /ship [ID] [Courier] [Tracking] [Date?]
+      if (command === '/ship') {
+        const orderId = args[1]?.toUpperCase();
+        const courier = args[2];
+        const tracking = args[3];
+        const date = args[4] || new Date().toISOString().split('T')[0];
+
+        if (!orderId || !courier || !tracking) {
+          await sendTelegram(userId, "⚠️ *Format:* \`/ship [ID] [Courier] [Tracking] [YYYY-MM-DD]\`\n_Date is optional._");
+          return NextResponse.json({ ok: true });
+        }
+
+        const { error } = await supabase
+          .from('sample_orders')
+          .update({ 
+            status: 'dispatched',
+            courier_name: courier,
+            tracking_number: tracking,
+            dispatched_at: date
+          })
+          .eq('order_id', orderId);
+
+        await sendTelegram(userId, error ? `❌ Logistics update failed` : `🚚 *${orderId}* marked as DISPATCHED\n📦 ${courier}: \`${tracking}\``);
+        return NextResponse.json({ ok: true });
+      }
+
+      // Default Help
+      await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+        chat_id: userId,
+        text: "👋 *A2Z Operations Bot*\n\n`/list` - View client-wise orders\n`/stats` - Overview\n`/view [ID]` - Details & Actions",
+        parse_mode: 'Markdown'
+      });
+      return NextResponse.json({ ok: true });
+    }
+
+    // --- Add this helper function at the bottom of the file (before the last }) ---
+    async function sendTelegram(chatId: string, text: string) {
+       await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          chat_id: chatId,
+          text: text,
+          parse_mode: 'Markdown'
+       });
+    }
+  
 
       // COMMAND: /delayed - Identify Bottlenecks
       if (text === '/delayed') {
