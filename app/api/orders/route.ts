@@ -158,12 +158,15 @@ async function parseFormData(request: NextRequest) {
 
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
+    // 1. Initialize Supabase Direct (Avoids the "Expected 2-3 arguments" error)
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+    const supabase = createSupabaseDirect(supabaseUrl, supabaseKey);
+
     const body = await request.json();
     const { client_id, styles } = body;
 
-    // 1. VERIFY CLIENT EXISTS
-    // We check the 'clients' table using the ID passed from the frontend
+    // 2. VERIFY CLIENT EXISTS
     const { data: client, error: clientError } = await supabase
       .from('clients')
       .select('id')
@@ -171,52 +174,44 @@ export async function POST(request: Request) {
       .single();
 
     if (clientError || !client) {
-      console.error('Client Verification Error:', clientError);
       return NextResponse.json({ 
         success: false, 
-        error: `Client ID ${client_id} not found in database.` 
+        error: `Client ID ${client_id} not found.` 
       }, { status: 404 });
     }
 
-    // 2. CREATE THE MAIN ORDER
-    // Your main table is 'sample_orders' based on your Supabase screenshot
+    // 3. CREATE THE MAIN ORDER
     const { data: order, error: orderError } = await supabase
       .from('sample_orders')
       .insert([{
         client_id: client_id,
         status: 'draft',
-        order_id: `ORD-${Math.floor(1000 + Math.random() * 9000)}`, // Generate a temp ID
+        order_id: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
         priority: 'medium'
       }])
       .select()
       .single();
 
-    if (orderError) {
-      console.error('Order Creation Error:', orderError);
-      throw orderError;
+    if (orderError) throw orderError;
+
+    // 4. CREATE THE STYLES
+    if (styles && styles.length > 0) {
+      const stylesToInsert = styles.map((s: any) => ({
+        order_id: order.id,
+        style_name: s.style_name,
+        item_number: s.item_number,
+        fabric: s.fabric,
+        color_name: s.color_name,
+        quantity: s.quantity,
+        print_type: s.print_type || 'solid_dyed'
+      }));
+
+      const { error: stylesError } = await supabase
+        .from('order_styles')
+        .insert(stylesToInsert);
+
+      if (stylesError) console.error('Styles Error:', stylesError);
     }
-
-  // 3. CREATE THE STYLES LINKED TO THIS ORDER
-  if (styles && styles.length > 0) {
-    const stylesToInsert = styles.map((s: any) => ({
-      order_id: order.id, // Linking to the new order
-      style_name: s.style_name,
-      item_number: s.item_number,
-      fabric: s.fabric,
-      color_name: s.color_name,
-      quantity: s.quantity,
-      print_type: s.print_type || 'solid_dyed'
-    }));
-
-    const { error: stylesError } = await supabase
-      .from('order_styles')
-      .insert(stylesToInsert);
-
-    if (stylesError) {
-      console.error('Styles Insertion Error:', stylesError);
-      // Optional: you might want to delete the main order if styles fail
-    }
-  }
 
     return NextResponse.json({ success: true, data: order });
 
