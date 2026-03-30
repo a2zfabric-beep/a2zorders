@@ -186,8 +186,12 @@ export async function POST(request: Request) {
       .insert([{
         client_id: client_id,
         status: 'draft',
-        order_id: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
-        priority: 'medium'
+        order_id: `ORD-${Math.floor(1000 + Math.random() * 10000)}`,
+        priority: 'medium',
+        
+        // ADD THESE TWO LINES TO FIX THE ERROR:
+        created_by: 'admin',      // Since you are creating this from the admin panel
+        order_source: 'structured' // Marking this as a manual creation
       }])
       .select()
       .single();
