@@ -72,8 +72,8 @@ export async function execute(sql: string, params?: any[]): Promise<{ rowCount: 
     // Simplified execution for testing
     console.log('Executing SQL:', sql);
     return { rowCount: 0 };
-  } catch (error) {
+  } catch (error: any) {
     console.error('Database execute error:', error);
-    throw new Error(`Database execute failed: ${error.message}`);
+    throw new Error(`Database execute failed: ${error.message || 'Unknown error'}`);
   }
 }
