@@ -14,7 +14,7 @@ interface Order {
   created_at: string;
   delivery_date: string | null;
   dispatched_at?: string | null;
-  production_workflow?: any; // Added to track stage counts
+  production_workflow?: any; 
 }
 
 export default function DashboardPage() {
@@ -43,13 +43,28 @@ export default function DashboardPage() {
   // --- BOLD ANALYTICS LOGIC ---
   const getStatusCount = (s: string) => orders.filter(o => o.status === s).length;
 
-  // --- PRODUCTION STAGE ANALYTICS ---
-  const getProductionStageCount = (stageId: number) => {
-    return orders.filter(o => {
-      const stage = o.production_workflow?.[stageId];
-      // We only count it if the stage is actually "in_progress"
-      return stage && stage.status === 'in_progress';
+  // --- PRODUCTION STAGE ANALYTICS (ON-TIME vs DELAYED) ---
+  const getStageStats = (stageId: number) => {
+    // We only look at orders that have COMPLETED this specific stage
+    const completedTasks = orders.filter(o => o.production_workflow?.[stageId]?.status === 'completed');
+    
+    if (completedTasks.length === 0) return { rate: 0, onTime: 0, delayed: 0, total: 0 };
+
+    const onTimeCount = completedTasks.filter(o => {
+      const s = o.production_workflow[stageId];
+      if (!s.startDate || !s.actualDate) return true;
+      
+      const start = new Date(s.startDate).setHours(0,0,0,0);
+      const end = new Date(s.actualDate).setHours(0,0,0,0);
+      const used = Math.floor((end - start) / (1000 * 3600 * 24));
+      
+      return used <= (s.assignedDays || 0);
     }).length;
+
+    const delayedCount = completedTasks.length - onTimeCount;
+    const rate = Math.round((onTimeCount / completedTasks.length) * 100);
+
+    return { rate, onTime: onTimeCount, delayed: delayedCount, total: completedTasks.length };
   };
 
   // OVERDUE: Not dispatched AND Target Date < Today
@@ -166,27 +181,65 @@ export default function DashboardPage() {
         </div>
       </section>
 
-      {/* --- PRODUCTION STAGE TRACKER --- */}
+      {/* --- STAGE PERFORMANCE TRACKER --- */}
       <section className="pt-4">
-        <h3 className="text-xs font-black text-blue-600 uppercase tracking-[0.2em] mb-4 ml-2">Active Production Stages (In-Progress)</h3>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="flex justify-between items-end mb-4 ml-2">
+           <div>
+              <h3 className="text-xs font-black text-gray-900 uppercase tracking-[0.2em]">Stage Performance</h3>
+              <p className="text-[10px] font-bold text-gray-400 uppercase">On-Time completion rate per production department</p>
+           </div>
+        </div>
+        
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
           {[
-            { id: 1, label: 'Fabric Procurement', color: 'bg-white border-blue-100' },
-            { id: 2, label: 'Dyeing Stage', color: 'bg-white border-pink-50' },
-            { id: 3, label: 'Printing Stage', color: 'bg-white border-indigo-50' },
-            { id: 4, label: 'Embroidery Stage', color: 'bg-white border-orange-50' },
-            { id: 5, label: 'Pattern & Sampling', color: 'bg-white border-emerald-50' },
-          ].map((s) => (
-            <div key={s.id} className={`${s.color} border-2 rounded-[1.5rem] p-5 shadow-sm hover:shadow-md transition-all group cursor-default`}>
-              <div className="flex justify-between items-start">
-                <p className="text-3xl font-black text-gray-900 group-hover:scale-110 transition-transform origin-left">
-                  {getProductionStageCount(s.id)}
-                </p>
-                <span className="text-[8px] font-black px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full uppercase">Stage {s.id}</span>
+            { id: 1, label: 'Fabric Procurement', theme: 'blue' },
+            { id: 2, label: 'Dyeing Stage', theme: 'pink' },
+            { id: 3, label: 'Printing Stage', theme: 'indigo' },
+            { id: 4, label: 'Embroidery Stage', theme: 'orange' },
+            { id: 5, label: 'Pattern & Sampling', theme: 'emerald' },
+          ].map((s) => {
+            const stats = getStageStats(s.id);
+            return (
+              <div key={s.id} className="bg-white border-2 border-gray-50 rounded-[2rem] p-6 shadow-sm hover:shadow-md transition-all group">
+                <div className="flex justify-between items-start mb-4">
+                  <div className="flex flex-col">
+                    <span className="text-2xl font-black text-gray-900 leading-none">{stats.rate}%</span>
+                    <span className="text-[8px] font-black uppercase text-gray-400 mt-1">Success Rate</span>
+                  </div>
+                  <span className={`text-[8px] font-black px-2 py-1 bg-gray-100 text-gray-500 rounded-lg uppercase`}>Stage {s.id}</span>
+                </div>
+                
+                {/* Visual Performance Bar */}
+                <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden mb-4">
+                  <div 
+                    className={`h-full rounded-full transition-all duration-1000 ${stats.rate < 70 ? 'bg-red-500' : 'bg-emerald-500'}`} 
+                    style={{ width: `${stats.rate}%` }}
+                  ></div>
+                </div>
+
+                <div className="space-y-1 mb-4">
+                  <p className="text-[10px] font-black text-gray-800 uppercase leading-tight h-8 line-clamp-2">{s.label}</p>
+                </div>
+
+                <div className="flex justify-between items-center border-t border-gray-50 pt-3">
+                  <div className="text-center">
+                    <p className="text-[9px] font-black text-emerald-600 leading-none">{stats.onTime}</p>
+                    <p className="text-[7px] font-bold text-gray-400 uppercase">On-Time</p>
+                  </div>
+                  <div className="h-4 w-px bg-gray-100"></div>
+                  <div className="text-center">
+                    <p className="text-[9px] font-black text-red-500 leading-none">{stats.delayed}</p>
+                    <p className="text-[7px] font-bold text-gray-400 uppercase">Delayed</p>
+                  </div>
+                  <div className="h-4 w-px bg-gray-100"></div>
+                  <div className="text-center">
+                    <p className="text-[9px] font-black text-gray-900 leading-none">{stats.total}</p>
+                    <p className="text-[7px] font-bold text-gray-400 uppercase">Total</p>
+                  </div>
+                </div>
               </div>
-              <p className="text-[10px] font-black text-gray-400 uppercase mt-2 tracking-tighter leading-tight">{s.label}</p>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </section>
 
