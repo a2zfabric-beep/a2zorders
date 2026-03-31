@@ -5,144 +5,169 @@ import axios from 'axios';
 
 export const dynamic = 'force-dynamic';
 
-// --- HELPER: Send Telegram Message ---
-async function sendTelegram(chatId: string, text: string) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
-    chat_id: chatId,
-    text: text,
-    parse_mode: 'Markdown'
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+
+// --- HELPER: Send Telegram Message (Using HTML mode for stability) ---
+async function sendTelegram(chatId: string, text: string, replyMarkup?: any) {
+  try {
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      chat_id: chatId,
+      text: text,
+      parse_mode: 'HTML', // HTML is more stable than Markdown for IDs like TG-4380
+      reply_markup: replyMarkup
+    });
+  } catch (err: any) {
+    console.error('Telegram Send Error:', err.response?.data || err.message);
+  }
+}
+
+async function answerCallback(callbackQueryId: string, text: string) {
+  await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/answerCallbackQuery`, {
+    callback_query_id: callbackQueryId,
+    text: text
   });
 }
 
 export async function POST(request: Request) {
   try {
-    const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
     const ALLOWED_USER_ID = process.env.TELEGRAM_ALLOWED_USER_ID;
-
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
     const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
     const supabase = createSupabaseDirect(supabaseUrl, supabaseKey);
 
     const body = await request.json();
 
-    // 1. Security Check
-    const userId = body.message?.from?.id?.toString();
-    if (userId !== ALLOWED_USER_ID) {
+    // --- 1. CALLBACK QUERY HANDLER (FOR MEDIA TAGGING) ---
+    if (body.callback_query) {
+      const callbackQuery = body.callback_query;
+      const adminId = callbackQuery.from.id.toString();
+      if (adminId !== ALLOWED_USER_ID) return NextResponse.json({ ok: true });
+
+      const data = callbackQuery.data; 
+      if (data.startsWith('attach_')) {
+        const orderIdString = data.replace('attach_', '');
+        const originalMediaMsg = callbackQuery.message.reply_to_message;
+
+        if (!originalMediaMsg) {
+          await answerCallback(callbackQuery.id, "❌ Original media not found.");
+          return NextResponse.json({ ok: true });
+        }
+
+        let fileId = '';
+        let fileType = 'image';
+        if (originalMediaMsg.photo) {
+          fileId = originalMediaMsg.photo[originalMediaMsg.photo.length - 1].file_id;
+          fileType = 'image';
+        } else if (originalMediaMsg.video) {
+          fileId = originalMediaMsg.video.file_id;
+          fileType = 'video';
+        } else if (originalMediaMsg.document) {
+          fileId = originalMediaMsg.document.file_id;
+          fileType = 'document';
+        }
+
+        const { error } = await supabase.from('order_media').insert([{
+          order_id: orderIdString,
+          telegram_message_id: originalMediaMsg.message_id.toString(),
+          chat_id: originalMediaMsg.chat.id.toString(),
+          file_id: fileId,
+          file_type: fileType,
+          created_at: new Date(originalMediaMsg.date * 1000).toISOString()
+        }]);
+
+        if (error) {
+          await answerCallback(callbackQuery.id, "❌ Database error.");
+        } else {
+          await answerCallback(callbackQuery.id, "✅ Media Attached!");
+          await sendTelegram(adminId, `✅ Media attached to Order <b>${orderIdString}</b>`);
+          await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/deleteMessage`, {
+            chat_id: adminId, message_id: callbackQuery.message.message_id
+          });
+        }
+      }
       return NextResponse.json({ ok: true });
     }
 
-    const text = body.message?.text;
-    const document = body.message?.document;
+    // --- 2. MESSAGE HANDLER ---
+    const message = body.message;
+    const userId = message?.from?.id?.toString();
+    if (userId !== ALLOWED_USER_ID) return NextResponse.json({ ok: true });
 
-    // 2. HANDLE TEXT COMMANDS
+    const text = message?.text;
+    const document = message?.document;
+
     if (text) {
       const args = text.split(' ');
       const command = args[0].toLowerCase();
       const param = args[1];
 
+      // COMMAND: /tag (Reply to media)
+      if (command === '/tag') {
+        const replyTo = message.reply_to_message;
+        if (!replyTo || (!replyTo.photo && !replyTo.video && !replyTo.document)) {
+          await sendTelegram(userId, "⚠️ <b>Reply to a photo/video</b> with /tag to attach it.");
+          return NextResponse.json({ ok: true });
+        }
+        const { data: orders } = await supabase.from('sample_orders').select('order_id').not('status', 'eq', 'dispatched').limit(10);
+        if (!orders?.length) {
+          await sendTelegram(userId, "⚠️ No active orders found.");
+          return NextResponse.json({ ok: true });
+        }
+        const keyboard = { inline_keyboard: orders.map(o => ([{ text: `Order ${o.order_id}`, callback_data: `attach_${o.order_id}` }])) };
+        await sendTelegram(userId, "📎 <b>Select Order to attach to:</b>", keyboard);
+        return NextResponse.json({ ok: true });
+      }
+
       // COMMAND: /stats
       if (command === '/stats') {
         const { data: orders } = await supabase.from('sample_orders').select('status');
-        const stats = orders?.reduce((acc: any, curr: any) => {
-          acc[curr.status] = (acc[curr.status] || 0) + 1;
-          return acc;
-        }, {});
-
-        const msg = `📊 *Operations Summary*\n\n` +
-          `📝 Drafts: *${stats?.draft || 0}*\n` +
-          `📨 Submitted: *${stats?.submitted || 0}*\n` +
-          `🔬 Sampling: *${stats?.sampling_in_progress || 0}*\n` +
-          `📦 Ready: *${stats?.ready || 0}*\n` +
-          `🚚 Dispatched: *${stats?.dispatched || 0}*`;
+        const stats = orders?.reduce((acc: any, curr: any) => { acc[curr.status] = (acc[curr.status] || 0) + 1; return acc; }, {});
+        const msg = `📊 <b>Operations Summary</b>\n\n` +
+          `📝 Drafts: <b>${stats?.draft || 0}</b>\n` +
+          `📨 Submitted: <b>${stats?.submitted || 0}</b>\n` +
+          `🔬 Sampling: <b>${stats?.sampling_in_progress || 0}</b>\n` +
+          `📦 Ready: <b>${stats?.ready || 0}</b>\n` +
+          `🚚 Dispatched: <b>${stats?.dispatched || 0}</b>`;
         await sendTelegram(userId, msg);
         return NextResponse.json({ ok: true });
       }
 
-      // COMMAND: /list
+      // COMMAND: /list (Simplified to avoid join errors)
       if (command === '/list') {
-        const { data: orders } = await supabase
-          .from('sample_orders')
-          .select('order_id, status, client:clients(name)')
-          .not('status', 'eq', 'dispatched');
-
-        if (!orders?.length) {
-          await sendTelegram(userId, "✅ *No active orders found.*");
+        const { data: orders, error } = await supabase.from('sample_orders').select('order_id, status').not('status', 'eq', 'dispatched');
+        if (error || !orders?.length) {
+          await sendTelegram(userId, "📋 <b>No active orders found.</b>");
           return NextResponse.json({ ok: true });
         }
-
-        const grouped: Record<string, any[]> = {};
-        orders.forEach((o: any) => {
-          const name = Array.isArray(o.client) ? o.client[0]?.name : o.client?.name;
-          const clientName = name || 'Unknown Client';
-          if (!grouped[clientName]) grouped[clientName] = [];
-          grouped[clientName].push(o);
+        let msg = `📋 <b>Active Orders</b>\n\n`;
+        orders.forEach(o => {
+          msg += `• <code>/view ${o.order_id}</code> — <i>${o.status}</i>\n`;
         });
-
-        let msg = `📋 *Active Order Directory*\n\n`;
-        for (const [client, clientOrders] of Object.entries(grouped)) {
-          msg += `👤 *${client}* (${clientOrders.length})\n`;
-          clientOrders.forEach(o => {
-            msg += `└ \`/view ${o.order_id}\` — _${o.status.replace('_', ' ')}_\n`;
-          });
-          msg += `\n`;
-        }
         await sendTelegram(userId, msg);
         return NextResponse.json({ ok: true });
       }
 
       // COMMAND: /view [ID]
       if (command === '/view' && param) {
-        const { data: order } = await supabase
-          .from('sample_orders')
-          .select('*, client:clients(name), styles:order_styles(*)')
-          .eq('order_id', param.toUpperCase())
-          .single();
-
+        const { data: order } = await supabase.from('sample_orders').select('*').eq('order_id', param.toUpperCase()).single();
         if (!order) {
-          await sendTelegram(userId, `❌ Order \`${param}\` not found.`);
+          await sendTelegram(userId, `❌ Order <b>${param}</b> not found.`);
           return NextResponse.json({ ok: true });
         }
 
-        const clientName = Array.isArray(order.client) ? order.client[0]?.name : order.client?.name;
-        let msg = `📦 *Order Detail: ${order.order_id}*\n` +
-          `👤 Client: *${clientName}*\n` +
-          `🏁 Status: *${order.status.toUpperCase()}*\n` +
-          `📅 Target: ${new Date(order.delivery_date).toLocaleDateString()}\n\n` +
-          `👕 *Styles (${order.styles?.length || 0}):*\n`;
+        // Separate query for styles using the internal integer ID
+        const { data: styles } = await supabase.from('order_styles').select('*').eq('order_id', order.id);
+
+        let msg = `📦 <b>Order: ${order.order_id}</b>\n` +
+          `🏁 Status: <b>${order.status.toUpperCase()}</b>\n` +
+          `📅 Target: ${order.delivery_date ? new Date(order.delivery_date).toLocaleDateString() : 'N/A'}\n\n` +
+          `👕 <b>Styles:</b>\n`;
         
-        order.styles?.forEach((s: any) => {
+        styles?.forEach((s: any) => {
           msg += `• ${s.item_number}: ${s.style_name} (${s.quantity}pcs)\n`;
         });
 
-        msg += `\n*Quick Actions:*\n` +
-          `/status_${order.order_id}_sampling\n` +
-          `/status_${order.order_id}_ready\n\n` +
-          `*Logistics:* \`/ship ${order.order_id} [Courier] [Tracking] [Date]\``;
-
-        await sendTelegram(userId, msg);
-        return NextResponse.json({ ok: true });
-      }
-
-      // COMMAND: /delayed
-      if (command === '/delayed') {
-        const { data: orders } = await supabase
-          .from('sample_orders')
-          .select('order_id, delivery_date, client:clients(name)')
-          .not('status', 'in', '("dispatched", "ready")');
-
-        const now = new Date();
-        const delayed = (orders as any[])?.filter(o => o.delivery_date && new Date(o.delivery_date) < now) || [];
-
-        let msg = `⚠️ *DELAYED ORDERS (${delayed.length})*\n\n`;
-        if (delayed.length === 0) {
-          msg = "✅ *All orders are currently on track!*";
-        } else {
-          delayed.forEach(o => {
-            const clientName = Array.isArray(o.client) ? o.client[0]?.name : o.client?.name;
-            msg += `• \`${o.order_id}\` | ${clientName || 'Unknown'}\n   📅 Target: ${new Date(o.delivery_date).toLocaleDateString()}\n\n`;
-          });
-        }
+        msg += `\n<b>Actions:</b>\n/status_${order.order_id}_sampling\n/status_${order.order_id}_ready\n\n/ship ${order.order_id} [Courier] [Tracking]`;
         await sendTelegram(userId, msg);
         return NextResponse.json({ ok: true });
       }
@@ -150,42 +175,34 @@ export async function POST(request: Request) {
       // COMMAND: /status_[ID]_[STAGE]
       if (command.startsWith('/status_')) {
         const parts = command.split('_');
-        const orderId = parts[1].toUpperCase();
+        const orderIdString = parts[1].toUpperCase();
         const newStatus = parts.slice(2).join('_');
-
-        const { error } = await supabase.from('sample_orders').update({ status: newStatus }).eq('order_id', orderId);
-        await sendTelegram(userId, error ? `❌ Update failed` : `✅ *${orderId}* moved to *${newStatus}*`);
+        const { error } = await supabase.from('sample_orders').update({ status: newStatus }).eq('order_id', orderIdString);
+        await sendTelegram(userId, error ? `❌ Update failed` : `✅ <b>${orderIdString}</b> is now <b>${newStatus}</b>`);
         return NextResponse.json({ ok: true });
       }
 
-      // COMMAND: /ship [ID] [Courier] [Tracking] [Date?]
+      // COMMAND: /ship [ID] [Courier] [Tracking]
       if (command === '/ship') {
         const oId = args[1]?.toUpperCase();
         const courier = args[2];
         const tracking = args[3];
-        const date = args[4] || new Date().toISOString().split('T')[0];
-
         if (!oId || !courier || !tracking) {
-          await sendTelegram(userId, "⚠️ *Format:* \`/ship [ID] [Courier] [Tracking] [YYYY-MM-DD]\`\n_Date is optional._");
+          await sendTelegram(userId, "⚠️ Use: <code>/ship [ID] [Courier] [Tracking]</code>");
           return NextResponse.json({ ok: true });
         }
-
-        const { error } = await supabase.from('sample_orders').update({ 
-          status: 'dispatched', courier_name: courier, tracking_number: tracking, dispatched_at: date 
-        }).eq('order_id', oId);
-
-        await sendTelegram(userId, error ? `❌ Logistics update failed` : `🚚 *${oId}* marked as DISPATCHED\n📦 ${courier}: \`${tracking}\``);
+        await supabase.from('sample_orders').update({ status: 'dispatched', courier_name: courier, tracking_number: tracking, dispatched_at: new Date().toISOString() }).eq('order_id', oId);
+        await sendTelegram(userId, `🚚 <b>${oId}</b> Dispatched via ${courier}`);
         return NextResponse.json({ ok: true });
       }
 
-      // Handle "Hi" or unknown text
-      if (command === 'hi' || command === '/start') {
-        await sendTelegram(userId, "👋 *A2Z Operations Bot*\n\n`/list` - View orders by client\n`/stats` - Overall summary\n`/delayed` - Bottleneck check\n\n_Or send an Excel file to create a new order._");
+      if (command === '/start' || command === 'hi') {
+        await sendTelegram(userId, "👋 <b>A2Z Ops Bot</b>\n\n/list - View orders\n/stats - Summary\n/tag - (Reply to photo) Tag media");
       }
       return NextResponse.json({ ok: true });
     }
 
-    // 3. HANDLE DOCUMENTS (Excel Upload)
+    // --- 3. EXCEL UPLOAD ---
     if (document) {
       const fileRes = await axios.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${document.file_id}`);
       const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileRes.data.result.file_path}`;
@@ -193,47 +210,34 @@ export async function POST(request: Request) {
       const workbook = XLSX.read(response.data, { type: 'buffer' });
       const rows: any[] = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
 
-      if (rows.length === 0) throw new Error("Excel sheet is empty.");
-
       const firstRow = rows[0];
       const clientEmail = firstRow.client_email?.trim().toLowerCase();
-      if (!clientEmail) throw new Error("Column 'client_email' is missing.");
+      if (!clientEmail) return NextResponse.json({ ok: true });
 
-      // Find or Create Client
       let { data: client } = await supabase.from('clients').select('id').eq('email', clientEmail).single();
       if (!client) {
-        const { data: nc, error: cErr } = await supabase.from('clients').insert([{ name: firstRow.client_name || 'New Client', email: clientEmail }]).select().single();
-        if (cErr) throw cErr;
+        const { data: nc } = await supabase.from('clients').insert([{ name: firstRow.client_name || 'New Client', email: clientEmail }]).select().single();
         client = nc;
       }
 
-      // Create Order (21 day lead time)
-      const dDate = firstRow.delivery_date ? new Date(firstRow.delivery_date) : new Date(Date.now() + 21 * 86400000);
-      const { data: order, error: oErr } = await supabase.from('sample_orders').insert([{
+      const { data: order } = await supabase.from('sample_orders').insert([{
         client_id: client?.id,
         order_id: `TG-${Math.floor(1000 + Math.random() * 9000)}`,
         status: 'submitted',
-        delivery_date: dDate.toISOString(),
+        delivery_date: new Date(Date.now() + 21 * 86400000).toISOString(),
         created_by: 'automation',
-        order_source: 'email',
-        priority: firstRow.priority?.toLowerCase() || 'medium'
+        order_source: 'email'
       }]).select().single();
-      if (oErr) throw oErr;
 
-      // Map Multiple Styles with initials
-      const initials = (firstRow.client_name || 'CL').substring(0, 4).toUpperCase();
       const stylesToInsert = rows.map((r, i) => ({
         order_id: order.id,
-        item_number: r.item_number || `${initials}-${1000 + i + 1}`,
-        style_name: r.style_name || 'General Clothing',
-        fabric: r.fabric || 'TBD',
-        color_name: r.color || 'TBD',
-        quantity: Number(r.quantity) || 1,
-        print_type: 'solid_dyed'
+        item_number: r.item_number || `STYLE-${1000 + i}`,
+        style_name: r.style_name || 'Item',
+        quantity: Number(r.quantity) || 1
       }));
 
       await supabase.from('order_styles').insert(stylesToInsert);
-      await sendTelegram(userId, `✅ *Order Created: ${order.order_id}*\nStyles Added: ${stylesToInsert.length}\nClient: ${firstRow.client_name}`);
+      await sendTelegram(userId, `✅ <b>Order Created: ${order.order_id}</b>`);
       return NextResponse.json({ ok: true });
     }
 
