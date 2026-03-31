@@ -14,6 +14,7 @@ interface Order {
   created_at: string;
   delivery_date: string | null;
   dispatched_at?: string | null;
+  production_workflow?: any; // Added to track stage counts
 }
 
 export default function DashboardPage() {
@@ -41,6 +42,15 @@ export default function DashboardPage() {
 
   // --- BOLD ANALYTICS LOGIC ---
   const getStatusCount = (s: string) => orders.filter(o => o.status === s).length;
+
+  // --- PRODUCTION STAGE ANALYTICS ---
+  const getProductionStageCount = (stageId: number) => {
+    return orders.filter(o => {
+      const stage = o.production_workflow?.[stageId];
+      // We only count it if the stage is actually "in_progress"
+      return stage && stage.status === 'in_progress';
+    }).length;
+  };
 
   // OVERDUE: Not dispatched AND Target Date < Today
   const overdueOrders = orders.filter(o => {
@@ -151,6 +161,30 @@ export default function DashboardPage() {
             <div key={s.label} className={`${s.color} border-2 rounded-[1.5rem] p-5 shadow-sm hover:shadow-md transition-all group cursor-default`}>
               <p className="text-3xl font-black text-gray-900 group-hover:scale-110 transition-transform origin-left">{s.count}</p>
               <p className="text-[10px] font-black text-gray-400 uppercase mt-1 tracking-tighter">{s.label.replace(/_/g, ' ')}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* --- PRODUCTION STAGE TRACKER --- */}
+      <section className="pt-4">
+        <h3 className="text-xs font-black text-blue-600 uppercase tracking-[0.2em] mb-4 ml-2">Active Production Stages (In-Progress)</h3>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          {[
+            { id: 1, label: 'Fabric Procurement', color: 'bg-white border-blue-100' },
+            { id: 2, label: 'Dyeing Stage', color: 'bg-white border-pink-50' },
+            { id: 3, label: 'Printing Stage', color: 'bg-white border-indigo-50' },
+            { id: 4, label: 'Embroidery Stage', color: 'bg-white border-orange-50' },
+            { id: 5, label: 'Pattern & Sampling', color: 'bg-white border-emerald-50' },
+          ].map((s) => (
+            <div key={s.id} className={`${s.color} border-2 rounded-[1.5rem] p-5 shadow-sm hover:shadow-md transition-all group cursor-default`}>
+              <div className="flex justify-between items-start">
+                <p className="text-3xl font-black text-gray-900 group-hover:scale-110 transition-transform origin-left">
+                  {getProductionStageCount(s.id)}
+                </p>
+                <span className="text-[8px] font-black px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full uppercase">Stage {s.id}</span>
+              </div>
+              <p className="text-[10px] font-black text-gray-400 uppercase mt-2 tracking-tighter leading-tight">{s.label}</p>
             </div>
           ))}
         </div>
