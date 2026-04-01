@@ -122,34 +122,64 @@ export async function POST(request: Request) {
             const orderId = `TASK-${Math.floor(1000 + Math.random() * 9000)}`;
             let { data: client } = await supabase.from('clients').select('id').eq('name', 'Internal Factory').single();
             if (!client) { const { data: nc } = await supabase.from('clients').insert([{ name: 'Internal Factory', email: `factory_${Date.now()}@internal.com` }]).select().single(); client = nc; }
-            const initialWF = { 5: { status: 'in_progress', assignedDays: 7, startDate: new Date().toISOString() } };
+            // Waterfall: Standalone task completes 1-4 and starts 5
+            const now = new Date().toISOString();
+            const initialWF = { 
+              1: { status: 'completed', assignedDays: 0, startDate: now, actualDate: now },
+              2: { status: 'completed', assignedDays: 0, startDate: now, actualDate: now },
+              3: { status: 'completed', assignedDays: 0, startDate: now, actualDate: now },
+              4: { status: 'completed', assignedDays: 0, startDate: now, actualDate: now },
+              5: { status: 'in_progress', assignedDays: 0, startDate: now } 
+            };
             await supabase.from('sample_orders').insert([{ client_id: client?.id, order_id: orderId, status: 'sampling_in_progress', production_workflow: initialWF }]);
-            await editTelegram(chatId, msgId, `✅ <b>Standalone Task Created: ${orderId}</b>\n🔬 Stage 5 (Sampling) Auto-Started.`);
+            await editTelegram(chatId, msgId, `✅ <b>Task Created: ${orderId}</b>\n🔬 Stage 5 started.\n\n🔢 Please set the budget below:`);
+            await sendTelegram(chatId, `🔢 <b>Set Budget (Days) for ${STAGE_NAMES[5]}</b>\nID: <code>${orderId}</code>\n\nReply with a number (e.g. 7)`, { force_reply: true });
         } else {
             const { keyboard } = await getOrderList(supabase);
             const orderButtons = (keyboard?.inline_keyboard || []).filter((row: any) => row[0].callback_data.startsWith('view_'));
             const newKeyboard = { inline_keyboard: orderButtons.map((row: any) => ([{ text: row[0].text, callback_data: `asgn_ord_${mediaId}_${row[0].callback_data.replace('view_', '')}` }])) };
-            await editTelegram(chatId, msgId, "🎯 <b>Select Order to Link Media:</b>", newKeyboard);
+            await editTelegram(chatId, msgId, "🎯 <b>Select Order to Link:</b>", newKeyboard);
         }
       }
       else if (data.startsWith("asgn_ord_")) {
         const [_, __, mediaId, orderId] = data.split("_");
         const stageButtons = [1, 2, 3, 4, 5].map(i => ([{ text: `${i}. ${STAGE_NAMES[i]}`, callback_data: `asgn_stg_${mediaId}_${orderId}_${i}` }]));
-        await editTelegram(chatId, msgId, `🏗 <b>Stage Selection: ${orderId}</b>\nWhich stage should start with this media?`, { inline_keyboard: stageButtons });
+        await editTelegram(chatId, msgId, `🏗 <b>Stage Selection: ${orderId}</b>\nWhich stage starts with this media?`, { inline_keyboard: stageButtons });
       }
       else if (data.startsWith("asgn_stg_")) {
         const [_, __, mediaId, orderId, stageId] = data.split("_");
+        const sNum = parseInt(stageId);
         const { data: order } = await supabase.from('sample_orders').select('production_workflow').eq('order_id', orderId).single();
         if (order) {
             const wf = order.production_workflow || {};
-            wf[stageId] = { ...(wf[stageId] || { assignedDays: 7 }), status: 'in_progress', startDate: new Date().toISOString() };
+            const now = new Date().toISOString();
+            // WATERFALL: Complete all previous stages
+            for (let i = 1; i < sNum; i++) {
+                if (!wf[i] || (wf[i].status !== 'completed' && wf[i].status !== 'na')) {
+                    wf[i] = { ...(wf[i] || { assignedDays: 0 }), status: 'completed', actualDate: now, startDate: wf[i]?.startDate || now };
+                }
+            }
+            const currentBudget = wf[sNum]?.assignedDays || 0;
+            wf[sNum] = { ...(wf[sNum] || { assignedDays: 0 }), status: 'in_progress', startDate: now };
             await supabase.from('sample_orders').update({ production_workflow: wf }).eq('order_id', orderId);
-            await editTelegram(chatId, msgId, `✅ <b>Success!</b>\nOrder: ${orderId}\nStage: ${STAGE_NAMES[parseInt(stageId)]} is now <b>In Progress</b>.`);
+            
+            if (currentBudget === 0) {
+                await editTelegram(chatId, msgId, `✅ <b>Success!</b>\nOrder: ${orderId}\nStage: ${STAGE_NAMES[sNum]} started.\n\n🔢 Please set the budget below:`);
+                await sendTelegram(chatId, `🔢 <b>Set Budget (Days) for ${STAGE_NAMES[sNum]}</b>\nID: <code>${orderId}</code>\n\nReply with a number (e.g. 5)`, { force_reply: true });
+            } else {
+                await editTelegram(chatId, msgId, `✅ <b>Success!</b>\nOrder: ${orderId}\nStage: ${STAGE_NAMES[sNum]} started.`);
+            }
         }
       }
       else if (data === "menu_main") {
         const mainKeyboard = { inline_keyboard: [[{ text: "📋 List Orders", callback_data: "menu_list" }, { text: "📊 Stats", callback_data: "menu_stats" }]] };
         await editTelegram(chatId, msgId, "🏠 <b>Admin Dashboard</b>", mainKeyboard);
+      }
+      else if (data === "menu_stats") {
+        const { count: total } = await supabase.from('sample_orders').select('*', { count: 'exact', head: true }).not('status', 'eq', 'dispatched');
+        const { count: ready } = await supabase.from('sample_orders').select('*', { count: 'exact', head: true }).eq('status', 'ready');
+        const statText = `📊 <b>System Stats</b>\n\nActive Orders: <b>${total || 0}</b>\nReady for Dispatch: <b>${ready || 0}</b>`;
+        await editTelegram(chatId, msgId, statText, { inline_keyboard: [[{ text: "⬅️ Back", callback_data: "menu_main" }]] });
       }
       else if (data === "menu_list") {
         const { text, keyboard } = await getOrderList(supabase);
