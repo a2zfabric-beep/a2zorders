@@ -47,14 +47,12 @@ async function getMeasurementTemplate(supabase: any, garmentType: string) {
   return data?.fields || [];
 }
 
-function generateTagPrompt(session: any) {
-  return `📸 <b>Tag Measurement: ${session.current_field}</b>\n\n` +
-         `🔹 Style: <b>${session.style_name}</b>\n` +
-         `👤 Client ID: <code>${session.client_id}</code>\n` +
-         `🔖 Ref: <code>${session.order_id || session.temp_entry_id}</code>\n` +
-         `📦 Type: ${session.session_type.toUpperCase()}\n\n` +
-         `📝 Remaining: <i>${session.remaining_fields?.join(', ') || 'None'}</i>\n\n` +
-         `👉 <b>REPLY to this message with the photo.</b>`;
+function generateMeasurementKeyboard(session: any) {
+  const fields = session.remaining_fields || [];
+  const buttons = fields.map((f: string) => ([{ text: f, callback_data: `ts_set_field_${f}` }]));
+  buttons.push([{ text: "✅ FINISH / DONE", callback_data: "ts_confirm_done" }]);
+  buttons.push([{ text: "🔄 Restart Selection", callback_data: `ts_cl_${session.session_type}_${session.client_id}` }]);
+  return { inline_keyboard: buttons };
 }
 
 // --- UI GENERATORS ---
@@ -69,7 +67,7 @@ async function getOrderDetail(supabase: any, orderId: string) {
   const { data: order } = await supabase.from('sample_orders').select('*, client:clients(name)').eq('order_id', orderId).single();
   if (!order) return { text: "❌ Order not found.", keyboard: { inline_keyboard: [[{ text: "⬅️ Back", callback_data: "menu_list" }]] } };
   const { data: styles } = await supabase.from('order_styles').select('*').eq('order_id', order.id);
-  const text = `🔖 <b>ID:</b> <code>${order.order_id}</code>\n👤 <b>Client:</b> ${order.client?.name || 'N/A'}\n🏁 <b>Status:</b> <code>${order.status.toUpperCase()}</code>\n📅 <b>Target:</b> ${order.delivery_date ? new Date(order.delivery_date).toLocaleDateString() : 'Flexible'}\n\n👕 <b>Styles:</b>\n` +
+  const text = `🔖 <b>ID:</b> <code>${order.order_id}</code>\n👤 <b>Client:</b> ${order.client?.name || 'N/A'}\n🏁 <b>Status:</b> <code>${order.status.toUpperCase()}</code>\n📅 <b>Target:</b> ${order.delivery_date ? new Date(order.delivery_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : 'Flexible'}\n\n👕 <b>Styles:</b>\n` +
     ((styles || []).map((s: any) => `• <code>${s.item_number || 'N/A'}</code>: ${s.style_name} (${s.quantity}pcs)`).join('\n') || '<i>No styles added</i>');
 
   const keyboard = {
@@ -132,7 +130,7 @@ export async function POST(request: Request) {
       const data = cb.data;
       if (adminId !== ALLOWED_USER_ID) return NextResponse.json({ ok: true });
 
-      // --- TAGGING SETUP FLOW ---
+      // --- 1. TAGGING SETUP FLOW ---
       if (data.startsWith("ts_init_")) {
         const type = data.replace("ts_init_", "");
         const { data: clients } = await supabase.from('clients').select('id, name');
@@ -154,6 +152,13 @@ export async function POST(request: Request) {
       }
       else if (data.startsWith("ts_gt_")) {
         const [_, __, type, clientId, orderId, gType] = data.split("_");
+        const { data: styles } = await supabase.from('order_styles').select('style_name').eq('order_id', orderId);
+        const buttons = (styles || []).map(s => ([{ text: s.style_name, callback_data: `ts_style_sel_${type}_${clientId}_${orderId}_${gType}_${s.style_name}` }]));
+        buttons.push([{ text: "➕ Enter New Style Name", callback_data: `ts_style_new_${type}_${clientId}_${orderId}_${gType}` }]);
+        await editTelegram(chatId, msgId, `👕 <b>Select Style for ${gType}:</b>`, { inline_keyboard: buttons });
+      }
+      else if (data.startsWith("ts_style_new_")) {
+        const [_, __, ___, type, clientId, orderId, gType] = data.split("_");
         const tempId = orderId === "NEW" ? "TEMP-" + Date.now() : null;
         await supabase.from('tagging_sessions').delete().eq('user_id', adminId);
         await supabase.from('tagging_sessions').insert([{
@@ -161,10 +166,46 @@ export async function POST(request: Request) {
             order_id: orderId === "NEW" ? null : orderId, temp_entry_id: tempId, garment_type: gType,
             remaining_fields: [], current_field: "WAITING_FOR_STYLE_NAME"
         }]);
-        await editTelegram(chatId, msgId, `✍️ <b>Enter Style Name</b> for this ${gType}:`);
+        await editTelegram(chatId, msgId, `✍️ <b>Type Style Name now:</b>`);
+      }
+      else if (data.startsWith("ts_style_sel_")) {
+        const [_, __, ___, type, clientId, orderId, gType, styleName] = data.split("_");
+        const fields = await getMeasurementTemplate(supabase, gType);
+        await supabase.from('tagging_sessions').delete().eq('user_id', adminId);
+        await supabase.from('tagging_sessions').insert([{
+            user_id: adminId, session_type: type, client_id: clientId,
+            order_id: orderId, garment_type: gType, style_name: styleName,
+            remaining_fields: fields, current_field: "READY_FOR_MEDIA"
+        }]);
+        await editTelegram(chatId, msgId, `📸 <b>Session Started: ${styleName}</b>\n\nReply to any photo with /tag to begin mapping.\n\nRequired: ${fields.join(', ')}`);
+      }
+      else if (data.startsWith("ts_set_field_")) {
+        const fieldName = data.replace("ts_set_field_", "");
+        const originalMsg = cb.message.reply_to_message;
+        if (!originalMsg) { await answerCallback(cb.id, "⚠️ Error: Reply to the photo!"); return NextResponse.json({ ok: true }); }
+        const { data: session } = await supabase.from('tagging_sessions').select('*').eq('user_id', adminId).single();
+        if (session) {
+            const fileId = originalMsg.photo ? originalMsg.photo[originalMsg.photo.length - 1].file_id : (originalMsg.video ? originalMsg.video.file_id : originalMsg.document.file_id);
+            const table = session.session_type === "sample" ? "sample_measurements" : "production_measurements";
+            await supabase.from(table).insert([{ client_id: session.client_id, order_id: session.order_id, temp_entry_id: session.temp_entry_id, garment_type: session.garment_type, style_name: session.style_name, measurement_type: fieldName, file_id: fileId }]);
+            const newRem = session.remaining_fields.filter((f: string) => f !== fieldName);
+            await supabase.from('tagging_sessions').update({ remaining_fields: newRem }).eq('user_id', adminId);
+            await editTelegram(chatId, msgId, `✅ <b>${fieldName} Saved!</b>\nMap next photo or press FINISH.`, generateMeasurementKeyboard({...session, remaining_fields: newRem}));
+        }
+      }
+      else if (data === "ts_confirm_done") {
+        await editTelegram(chatId, msgId, "❓ <b>Is tagging complete for this style?</b>", { inline_keyboard: [[{ text: "✅ Yes, Finalize", callback_data: "ts_final_yes" }, { text: "⬅️ No, Go Back", callback_data: "ts_final_no" }]] });
+      }
+      else if (data === "ts_final_yes") {
+        const { data: s } = await supabase.from('tagging_sessions').select('*').eq('user_id', adminId).single();
+        if (s) { await sendTelegram(chatId, `✅ <b>Tagging Completed Successfully</b>\nStyle: ${s.style_name}\nRef: ${s.order_id || s.temp_entry_id}`); await supabase.from('tagging_sessions').delete().eq('user_id', adminId); }
+      }
+      else if (data === "ts_final_no") {
+        const { data: s } = await supabase.from('tagging_sessions').select('*').eq('user_id', adminId).single();
+        if (s) await editTelegram(chatId, msgId, `📸 <b>Continue Tagging: ${s.style_name}</b>`, generateMeasurementKeyboard(s));
       }
 
-      // --- ASSIGNMENT & WATERFALL FLOW ---
+      // --- 2. ASSIGNMENT & WATERFALL ---
       else if (data.startsWith("asgn_mode_")) {
         const [_, __, mediaId, mode] = data.split("_");
         if (mode === "standalone") {
@@ -201,11 +242,7 @@ export async function POST(request: Request) {
         if (order) {
             const wf = order.production_workflow || {};
             const now = new Date().toISOString();
-            for (let i = 1; i < sNum; i++) {
-                if (!wf[i] || (wf[i].status !== 'completed' && wf[i].status !== 'na')) {
-                    wf[i] = { ...(wf[i] || { assignedDays: 0 }), status: 'completed', actualDate: now, startDate: wf[i]?.startDate || now };
-                }
-            }
+            for (let i = 1; i < sNum; i++) { if (!wf[i] || (wf[i].status !== 'completed' && wf[i].status !== 'na')) { wf[i] = { ...(wf[i] || { assignedDays: 0 }), status: 'completed', actualDate: now, startDate: wf[i]?.startDate || now }; } }
             const currentBudget = wf[sNum]?.assignedDays || 0;
             wf[sNum] = { ...(wf[sNum] || { assignedDays: 0 }), status: 'in_progress', startDate: now };
             await supabase.from('sample_orders').update({ production_workflow: wf }).eq('order_id', orderId);
@@ -216,7 +253,7 @@ export async function POST(request: Request) {
         }
       }
 
-      // --- MENU HANDLERS ---
+      // --- 3. MENU & HUB ---
       else if (data === "menu_main") {
         const mainKeyboard = { inline_keyboard: [[{ text: "📋 List Orders", callback_data: "menu_list" }, { text: "📊 Stats", callback_data: "menu_stats" }], [{ text: "⏳ Pending Tasks", callback_data: "menu_pending" }]] };
         await editTelegram(chatId, msgId, "🏠 <b>Admin Dashboard</b>", mainKeyboard);
@@ -232,12 +269,13 @@ export async function POST(request: Request) {
         let response = "⏳ <b>Pending Tasks</b>\n\n";
         (orders || []).forEach((o: any) => {
             const wf = o.production_workflow || {};
-            const activeId = Object.keys(wf).find(k => wf[k].status === 'in_progress');
-            if (activeId) {
-                const s = wf[activeId];
-                const due = new Date(new Date(s.startDate).getTime() + (s.assignedDays || 0) * 86400000);
+            const actId = Object.keys(wf).find(k => wf[k].status === 'in_progress');
+            if (actId) {
+                const s = wf[actId];
+                const budget = s.assignedDays || 0;
+                const due = new Date(new Date(s.startDate).getTime() + budget * 86400000);
                 const diff = Math.ceil((due.getTime() - new Date().getTime()) / 86400000);
-                response += `👤 ${o.client?.name || 'N/A'} | <code>${o.order_id}</code>\n📍 ${STAGE_NAMES[parseInt(activeId)]} | ${diff >= 0 ? diff + 'd left' : '⚠️ ' + Math.abs(diff) + 'd overdue'}\n\n`;
+                response += `👤 ${o.client?.name || 'N/A'} | <code>${o.order_id}</code>\n📍 ${STAGE_NAMES[parseInt(actId)]} | ${diff >= 0 ? diff + 'd left' : '⚠️ ' + Math.abs(diff) + 'd overdue'}\n\n`;
             }
         });
         await editTelegram(chatId, msgId, response || "✅ No pending tasks.", { inline_keyboard: [[{ text: "⬅️ Back", callback_data: "menu_main" }]] });
@@ -246,8 +284,6 @@ export async function POST(request: Request) {
         const { text, keyboard } = await getOrderList(supabase);
         await editTelegram(chatId, msgId, text, keyboard);
       }
-
-      // --- WORKFLOW BUTTONS ---
       else if (data.startsWith("view_")) {
         const { text, keyboard } = await getOrderDetail(supabase, data.replace("view_", ""));
         await editTelegram(chatId, msgId, text, keyboard);
@@ -301,12 +337,9 @@ export async function POST(request: Request) {
         await sendTelegram(chatId, prompt, { force_reply: true, reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: `view_${oId}` }]] } });
       }
       else if (data.startsWith("attach_")) {
-        const [_, orderId, originalMediaMsgId] = data.split("_");
+        const [_, orderId, mediaId] = data.split("_");
         const mediaMsg = cb.message.reply_to_message;
-        if (!mediaMsg || mediaMsg.message_id.toString() !== originalMediaMsgId) {
-            await sendTelegram(chatId, "⚠️ <b>Context lost.</b> Please reply to the photo again and type /tag.");
-            return NextResponse.json({ ok: true });
-        }
+        if (!mediaMsg || mediaMsg.message_id.toString() !== mediaId) { await sendTelegram(chatId, "⚠️ <b>Context lost.</b> Please reply again."); return NextResponse.json({ ok: true }); }
         const mediaDate = new Date(mediaMsg.date * 1000).toISOString();
         let fileId = mediaMsg.photo ? mediaMsg.photo[mediaMsg.photo.length - 1].file_id : (mediaMsg.video ? mediaMsg.video.file_id : mediaMsg.document?.file_id);
         if (fileId) {
@@ -327,54 +360,27 @@ export async function POST(request: Request) {
     if (!message) return NextResponse.json({ ok: true });
     const userId = message.from.id.toString();
     const chatId = message.chat.id.toString();
-
     if (userId !== ALLOWED_USER_ID) return NextResponse.json({ ok: true });
 
     if (message.text) {
       const text = message.text;
       const { data: session } = await supabase.from('tagging_sessions').select('*').eq('user_id', userId).single();
 
-      // --- SESSION CONTROL ---
       if (session) {
-        if (text.toLowerCase() === 'cancel') {
-          await supabase.from('tagging_sessions').delete().eq('user_id', userId);
-          await sendTelegram(chatId, "❌ Tagging session cancelled.");
-          return NextResponse.json({ ok: true });
-        }
+        if (text.toLowerCase() === 'cancel') { await supabase.from('tagging_sessions').delete().eq('user_id', userId); await sendTelegram(chatId, "❌ Session cancelled."); return NextResponse.json({ ok: true }); }
         if (session.current_field === "WAITING_FOR_STYLE_NAME") {
           const fields = await getMeasurementTemplate(supabase, session.garment_type);
-          const first = fields[0];
-          const rem = fields.slice(1);
-          await supabase.from('tagging_sessions').update({ style_name: text, current_field: first, remaining_fields: rem }).eq('user_id', userId);
-          await sendTelegram(chatId, generateTagPrompt({ ...session, style_name: text, current_field: first, remaining_fields: rem }));
-          return NextResponse.json({ ok: true });
-        }
-        if (text.toLowerCase() === 'skip') {
-          const next = session.remaining_fields[0];
-          const nextRem = session.remaining_fields.slice(1);
-          if (!next) {
-            await supabase.from('tagging_sessions').delete().eq('user_id', userId);
-            await sendTelegram(chatId, "✅ Tagging Finished.");
-          } else {
-            await supabase.from('tagging_sessions').update({ current_field: next, remaining_fields: nextRem }).eq('user_id', userId);
-            await sendTelegram(chatId, generateTagPrompt({ ...session, current_field: next, remaining_fields: nextRem }));
-          }
+          await supabase.from('tagging_sessions').update({ style_name: text, current_field: "READY_FOR_MEDIA", remaining_fields: fields }).eq('user_id', userId);
+          await sendTelegram(chatId, `📸 <b>Session Started: ${text}</b>\n\nReply to any photo with /tag to begin mapping.`);
           return NextResponse.json({ ok: true });
         }
       }
 
-      // --- CORE COMMANDS ---
-      if (text === "/sample_approved") {
-        await sendTelegram(chatId, "🛠 <b>Sample Approval</b>", { inline_keyboard: [[{ text: "🚀 Start", callback_data: "ts_init_sample" }]] });
-        return NextResponse.json({ ok: true });
-      }
-      if (text === "/production_piece") {
-        await sendTelegram(chatId, "🏭 <b>Production Tagging</b>", { inline_keyboard: [[{ text: "🚀 Start", callback_data: "ts_init_production" }]] });
-        return NextResponse.json({ ok: true });
-      }
+      if (text === "/sample_approved") { await sendTelegram(chatId, "🛠 <b>Sample Approval</b>", { inline_keyboard: [[{ text: "🚀 Start", callback_data: "ts_init_sample" }]] }); return NextResponse.json({ ok: true }); }
+      if (text === "/production_piece") { await sendTelegram(chatId, "🏭 <b>Production Tagging</b>", { inline_keyboard: [[{ text: "🚀 Start", callback_data: "ts_init_production" }]] }); return NextResponse.json({ ok: true }); }
       if (text.startsWith("/pending")) {
         const { data: orders } = await supabase.from('sample_orders').select('order_id, production_workflow, client:clients(name)').not('status', 'eq', 'dispatched');
-        let response = "⏳ <b>Pending Tasks</b>\n\n";
+        let resp = "⏳ <b>Pending Tasks</b>\n\n";
         (orders || []).forEach((o: any) => {
             const wf = o.production_workflow || {};
             const actId = Object.keys(wf).find(k => wf[k].status === 'in_progress');
@@ -382,14 +388,13 @@ export async function POST(request: Request) {
                 const s = wf[actId];
                 const due = new Date(new Date(s.startDate).getTime() + (s.assignedDays || 0) * 86400000);
                 const diff = Math.ceil((due.getTime() - new Date().getTime()) / 86400000);
-                response += `👤 <b>${o.client?.name || 'N/A'}</b>\n📦 ${o.order_id} (${STAGE_NAMES[parseInt(actId)]})\n📅 ${diff >= 0 ? '🟢 ' + diff + ' days left' : '🔴 OVERDUE ' + Math.abs(diff) + ' days'}\n\n`;
+                resp += `👤 <b>${o.client?.name || 'N/A'}</b>\n📦 ${o.order_id} | ${diff >= 0 ? diff + 'd left' : '⚠️ ' + Math.abs(diff) + 'd overdue'}\n\n`;
             }
         });
-        await sendTelegram(chatId, response || "✅ No pending tasks found.");
+        await sendTelegram(chatId, resp || "✅ No pending tasks.");
         return NextResponse.json({ ok: true });
       }
 
-      // --- REPLY HANDLERS ---
       if (message.reply_to_message?.text?.startsWith('🚚 Dispatching Order:')) {
         const oId = message.reply_to_message.text.match(/(TG-\d+|ORD-\d+|FAC-\d+|TASK-\d+)/)?.[0];
         if (text.toLowerCase() === 'cancel') { await sendTelegram(chatId, "❌ Dispatch cancelled."); return NextResponse.json({ ok: true }); }
@@ -398,78 +403,59 @@ export async function POST(request: Request) {
             const [tracking, courier, dateStr] = parts; const [d, m, y] = dateStr.split('-');
             await supabase.from('sample_orders').update({ status: 'dispatched', courier_name: courier, tracking_number: tracking, dispatched_at: new Date(`${y}-${m}-${d}`).toISOString() }).eq('order_id', oId);
             await sendTelegram(chatId, `✅ <b>Order ${oId} Dispatched</b>`);
-        } else { await sendTelegram(chatId, "⚠️ Invalid format. Use: Tracking | Courier | DD-MM-YYYY", { force_reply: true }); }
+        } else { await sendTelegram(chatId, "⚠️ Format: Tracking | Courier | DD-MM-YYYY", { force_reply: true }); }
         return NextResponse.json({ ok: true });
       }
 
       if (message.reply_to_message?.text?.includes('Set Budget (Days)')) {
-        const oId = message.reply_to_message.text.match(/(TG-\d+|ORD-\d+|TASK-\d+)/)?.[0];
+        const oId = message.reply_to_message.text.match(/(TG-\d+|ORD-\d+|FAC-\d+|TASK-\d+)/)?.[0];
         const sName = message.reply_to_message.text.match(/for (.*)\n/)?.[1];
         const sId = Object.keys(STAGE_NAMES).find(key => STAGE_NAMES[parseInt(key)] === sName);
         if (oId && sId) {
             const { data: order } = await supabase.from('sample_orders').select('production_workflow').eq('order_id', oId).single();
-            if (order) {
-                const wf = order.production_workflow || {};
-                wf[sId] = { ...(wf[sId] || {}), assignedDays: parseInt(text) || 0 };
-                await supabase.from('sample_orders').update({ production_workflow: wf }).eq('order_id', oId);
-                await sendTelegram(chatId, `✅ Budget set to ${text} days for ${sName}.`);
-            }
+            if (order) { const wf = order.production_workflow || {}; wf[sId] = { ...(wf[sId] || {}), assignedDays: parseInt(text) || 0 }; await supabase.from('sample_orders').update({ production_workflow: wf }).eq('order_id', oId); await sendTelegram(chatId, `✅ Budget set to ${text} days.`); }
         }
         return NextResponse.json({ ok: true });
       }
 
       if (text.startsWith("/assign") || text.startsWith("/task")) {
         const mediaMsg = message.reply_to_message;
-        if (!mediaMsg) { await sendTelegram(chatId, "❌ Please reply to a media message with /assign"); return NextResponse.json({ ok: true }); }
+        if (!mediaMsg) { await sendTelegram(chatId, "❌ Reply to media with /assign"); return NextResponse.json({ ok: true }); }
         const keyboard = { inline_keyboard: [[{ text: "🆕 Standalone Task", callback_data: `asgn_mode_${mediaMsg.message_id}_standalone` }], [{ text: "🔗 Associate to Order", callback_data: `asgn_mode_${mediaMsg.message_id}_associate` }]] };
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, { chat_id: chatId, text: "🛠 <b>Assignment Engine:</b>", parse_mode: 'HTML', reply_to_message_id: mediaMsg.message_id, reply_markup: keyboard });
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, { chat_id: chatId, text: "🛠 <b>Assignment</b>", parse_mode: 'HTML', reply_to_message_id: mediaMsg.message_id, reply_markup: keyboard });
       }
       else if (text.startsWith("/tag")) {
         const mediaMsg = message.reply_to_message;
         if (!mediaMsg) return NextResponse.json({ ok: true });
         const { data: orders } = await supabase.from('sample_orders').select('order_id, client:clients(name)').not('status', 'eq', 'dispatched').order('created_at', { ascending: false }).limit(10);
         const buttons = (orders || []).map((o: any) => ([{ text: `${o.order_id} | ${o.client?.name || 'Client'}`, callback_data: `attach_${o.order_id}_${mediaMsg.message_id}` }]));
-        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, { chat_id: chatId, text: "📎 <b>Tag media to:</b>", parse_mode: 'HTML', reply_to_message_id: mediaMsg.message_id, reply_markup: { inline_keyboard: buttons } });
+        await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, { chat_id: chatId, text: "📎 <b>Tag to:</b>", parse_mode: 'HTML', reply_to_message_id: mediaMsg.message_id, reply_markup: { inline_keyboard: buttons } });
       }
       else if (text === "/start" || text.toLowerCase() === "menu") {
         const mainKeyboard = { inline_keyboard: [[{ text: "📋 List Orders", callback_data: "menu_list" }, { text: "📊 Stats", callback_data: "menu_stats" }], [{ text: "⏳ Pending Tasks", callback_data: "menu_pending" }]] };
-        await sendTelegram(chatId, "👋 <b>Garment Admin Dashboard</b>", mainKeyboard);
+        await sendTelegram(chatId, "👋 <b>Admin Dashboard</b>", mainKeyboard);
       }
     }
 
-    // --- TAGGING PHOTO HANDLER ---
     const mediaObj = message.photo || message.video || message.document;
     if (mediaObj && message.reply_to_message) {
       const { data: session } = await supabase.from('tagging_sessions').select('*').eq('user_id', userId).single();
       if (session && session.current_field !== "WAITING_FOR_STYLE_NAME") {
-        const fileId = message.photo ? message.photo[message.photo.length - 1].file_id : (message.video ? message.video.file_id : message.document.file_id);
-        const table = session.session_type === "sample" ? "sample_measurements" : "production_measurements";
-        await supabase.from(table).insert([{ client_id: session.client_id, order_id: session.order_id, temp_entry_id: session.temp_entry_id, garment_type: session.garment_type, style_name: session.style_name, measurement_type: session.current_field, file_id: fileId }]);
-        const next = session.remaining_fields[0];
-        const nextRem = session.remaining_fields.slice(1);
-        if (!next) {
-            await supabase.from('tagging_sessions').delete().eq('user_id', userId);
-            await sendTelegram(chatId, `✅ <b>Tagging Completed!</b>\nStyle: ${session.style_name}`);
-        } else {
-            await supabase.from('tagging_sessions').update({ current_field: next, remaining_fields: nextRem }).eq('user_id', userId);
-            await sendTelegram(chatId, generateTagPrompt({ ...session, current_field: next, remaining_fields: nextRem }));
-        }
+        await sendTelegram(chatId, `📍 <b>Media Detected</b>\nWhich measurement is this?`, { reply_to_message_id: message.message_id, reply_markup: generateMeasurementKeyboard(session) });
         return NextResponse.json({ ok: true });
       }
     }
 
-    // --- EXCEL IMPORT ---
     if (message.document && message.document.file_name?.endsWith('.xlsx')) {
         const fileRes = await axios.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${message.document.file_id}`);
         const response = await axios.get(`https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileRes.data.result.file_path}`, { responseType: 'arraybuffer' });
         const rows: any[] = XLSX.utils.sheet_to_json(XLSX.read(response.data, { type: 'buffer' }).Sheets[0]);
-        const clientEmail = rows[0]?.client_email?.trim().toLowerCase();
-        if (clientEmail) {
-            let { data: client } = await supabase.from('clients').select('id').eq('email', clientEmail).single();
-            if (!client) { const { data: nc } = await supabase.from('clients').insert([{ name: rows[0].client_name, email: clientEmail }]).select().single(); client = nc; }
+        if (rows[0]?.client_email) {
+            let { data: client } = await supabase.from('clients').select('id').eq('email', rows[0].client_email).single();
+            if (!client) { const { data: nc } = await supabase.from('clients').insert([{ name: rows[0].client_name, email: rows[0].client_email }]).select().single(); client = nc; }
             const initialWF = { 5: { status: 'in_progress', assignedDays: 7, startDate: new Date().toISOString() } };
             const { data: order } = await supabase.from('sample_orders').insert([{ client_id: client?.id, order_id: `TG-${Math.floor(1000 + Math.random() * 9000)}`, status: 'submitted', production_workflow: initialWF }]).select().single();
-            if (order) { await supabase.from('order_styles').insert(rows.map((r: any) => ({ order_id: order.id, style_name: r.style_name, quantity: r.quantity }))); await sendTelegram(chatId, `✅ <b>Order Imported via Excel.</b>`); }
+            if (order) { await supabase.from('order_styles').insert(rows.map((r: any) => ({ order_id: order.id, style_name: r.style_name, quantity: r.quantity }))); await sendTelegram(chatId, `✅ <b>Imported.</b>`); }
         }
     }
     return NextResponse.json({ ok: true });
