@@ -7,10 +7,10 @@ export const dynamic = 'force-dynamic';
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
 // --- HELPERS ---
-async function sendTelegram(chatId: string, text: string, replyMarkup?: any) {
+async function sendTelegram(chatId: string, text: string, replyMarkup?: any, replyToId?: number) {
   try {
     await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-      chat_id: chatId, text, parse_mode: 'HTML', reply_markup: replyMarkup
+      chat_id: chatId, text, parse_mode: 'HTML', reply_markup: replyMarkup, reply_to_message_id: replyToId
     });
   } catch (err: any) { console.error('Telegram Send Error:', err.response?.data || err.message); }
 }
@@ -375,10 +375,10 @@ export async function POST(request: Request) {
       const text = message.text;
       const { data: session } = await supabase.from('tagging_sessions').select('*').eq('user_id', userId).single();
 
-      // --- 1. TECHNICAL MAPPING COMMAND (/map) ---
+      // --- 1. NEW: TECHNICAL MAPPING COMMAND (/map) ---
       if (text.startsWith("/map")) {
         if (!session) {
-          await sendTelegram(chatId, "⚠️ No active session. Start with /sample_approved");
+          await sendTelegram(chatId, "⚠️ No active technical session. Start one with /sample_approved");
           return NextResponse.json({ ok: true });
         }
         const mediaMsg = message.reply_to_message;
@@ -386,10 +386,8 @@ export async function POST(request: Request) {
           await sendTelegram(chatId, "❌ Please <b>REPLY</b> to a photo with <code>/map</code> to assign it.");
           return NextResponse.json({ ok: true });
         }
-        await sendTelegram(chatId, `📍 <b>Mapping: ${session.style_name}</b>\nWhich measurement is this?`, {
-            reply_to_message_id: mediaMsg.message_id,
-            reply_markup: generateMeasurementKeyboard(session)
-        });
+        // Fixed Call: Passing keyboard and replyId separately
+        await sendTelegram(chatId, `📍 <b>Mapping Style: ${session.style_name}</b>\nWhich measurement is this photo for?`, generateMeasurementKeyboard(session), mediaMsg.message_id);
         return NextResponse.json({ ok: true });
       }
 
@@ -471,7 +469,7 @@ export async function POST(request: Request) {
       }
     }
 
-    // --- 6. EXCEL IMPORT ---
+    // --- FINAL EXCEL IMPORT HANDLER ---
     if (message.document && message.document.file_name?.endsWith('.xlsx')) {
         const fileRes = await axios.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${message.document.file_id}`);
         const response = await axios.get(`https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileRes.data.result.file_path}`, { responseType: 'arraybuffer' });
