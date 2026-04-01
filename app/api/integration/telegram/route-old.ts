@@ -41,22 +41,6 @@ function calculateSpent(start: string, end?: string) {
   return Math.max(0, Math.floor((e - s) / (1000 * 3600 * 24)));
 }
 
-// --- TAGGING SYSTEM HELPERS ---
-async function getMeasurementTemplate(supabase: any, garmentType: string) {
-  const { data } = await supabase.from('measurement_templates').select('fields').eq('garment_type', garmentType).single();
-  return data?.fields || [];
-}
-
-function generateTagPrompt(session: any) {
-  return `📸 <b>Tag Measurement: ${session.current_field}</b>\n\n` +
-         `🔹 Style: <b>${session.style_name}</b>\n` +
-         `👤 Client ID: <code>${session.client_id}</code>\n` +
-         `🔖 Ref: <code>${session.order_id || session.temp_entry_id}</code>\n` +
-         `📦 Type: ${session.session_type.toUpperCase()}\n\n` +
-         `📝 Remaining: <i>${session.remaining_fields?.join(', ') || 'None'}</i>\n\n` +
-         `👉 <b>REPLY to this message with the photo.</b>`;
-}
-
 // --- UI GENERATORS ---
 async function getOrderList(supabase: any) {
   const { data: orders } = await supabase.from('sample_orders').select('order_id, status, client:clients(name)').not('status', 'eq', 'dispatched').order('created_at', { ascending: false }).limit(15);
@@ -87,14 +71,13 @@ async function getWorkflowHub(supabase: any, orderId: string) {
   const { data: order } = await supabase.from('sample_orders').select('order_id, production_workflow').eq('order_id', orderId).single();
   if (!order) return { text: "❌ Not found.", keyboard: null };
   const stages = order.production_workflow || {};
-  let text = `⚙️ <b>Workflow Hub: ${orderId}</b>\n\n`;
+  let text = `⚙️ <b>Workflow: ${orderId}</b>\n\n`;
   const buttons = [];
   for (let i = 1; i <= 5; i++) {
     const s = stages[i] || { status: 'pending', assignedDays: 0 };
     const icon = s.status === 'completed' ? '✅' : (s.status === 'in_progress' ? '🔵' : (s.status === 'na' ? '⚪' : '🕒'));
     const spent = s.startDate ? calculateSpent(s.startDate, s.actualDate) : 0;
-    const delayWarn = (spent > s.assignedDays && s.assignedDays > 0 && s.status !== 'completed') ? '⚠️' : '';
-    text += `${icon} <b>${STAGE_NAMES[i]}</b>\n   Status: <i>${s.status}</i>\n   Time: ${spent}d / ${s.assignedDays || 0}d ${delayWarn}\n\n`;
+    text += `${icon} <b>${STAGE_NAMES[i]}</b>\n   Status: <i>${s.status}</i>\n   Time: ${spent}d / ${s.assignedDays || 0}d\n\n`;
     buttons.push([{ text: `${icon} Manage ${STAGE_NAMES[i]}`, callback_data: `wf_stage_${orderId}_${i}` }]);
   }
   buttons.push([{ text: "⬅️ Back to Detail", callback_data: `view_${orderId}` }]);
@@ -130,47 +113,16 @@ export async function POST(request: Request) {
       const chatId = cb.message.chat.id.toString();
       const msgId = cb.message.message_id;
       const data = cb.data;
+
       if (adminId !== ALLOWED_USER_ID) return NextResponse.json({ ok: true });
 
-      // --- TAGGING SETUP FLOW ---
-      if (data.startsWith("ts_init_")) {
-        const type = data.replace("ts_init_", "");
-        const { data: clients } = await supabase.from('clients').select('id, name');
-        const buttons = (clients || []).map(c => ([{ text: c.name, callback_data: `ts_cl_${type}_${c.id}` }]));
-        await editTelegram(chatId, msgId, "👤 <b>Select Client:</b>", { inline_keyboard: buttons });
-      }
-      else if (data.startsWith("ts_cl_")) {
-        const [_, __, type, clientId] = data.split("_");
-        const { data: orders } = await supabase.from('sample_orders').select('order_id').eq('client_id', clientId).not('status', 'eq', 'dispatched');
-        const buttons = (orders || []).map(o => ([{ text: `Order: ${o.order_id}`, callback_data: `ts_ord_${type}_${clientId}_${o.order_id}` }]));
-        buttons.push([{ text: "🆕 Create New Entry", callback_data: `ts_ord_${type}_${clientId}_NEW` }]);
-        await editTelegram(chatId, msgId, "🔖 <b>Select Reference:</b>", { inline_keyboard: buttons });
-      }
-      else if (data.startsWith("ts_ord_")) {
-        const [_, __, type, clientId, orderRef] = data.split("_");
-        const types = ["Top/Shirt/Tshirt", "Dress", "Trouser/Pant/Shorts", "Skirt"];
-        const buttons = types.map(t => ([{ text: t, callback_data: `ts_gt_${type}_${clientId}_${orderRef}_${t}` }]));
-        await editTelegram(chatId, msgId, "👗 <b>Select Garment Type:</b>", { inline_keyboard: buttons });
-      }
-      else if (data.startsWith("ts_gt_")) {
-        const [_, __, type, clientId, orderId, gType] = data.split("_");
-        const tempId = orderId === "NEW" ? "TEMP-" + Date.now() : null;
-        await supabase.from('tagging_sessions').delete().eq('user_id', adminId);
-        await supabase.from('tagging_sessions').insert([{
-            user_id: adminId, session_type: type, client_id: clientId,
-            order_id: orderId === "NEW" ? null : orderId, temp_entry_id: tempId, garment_type: gType,
-            remaining_fields: [], current_field: "WAITING_FOR_STYLE_NAME"
-        }]);
-        await editTelegram(chatId, msgId, `✍️ <b>Enter Style Name</b> for this ${gType}:`);
-      }
-
-      // --- ASSIGNMENT & WATERFALL FLOW ---
-      else if (data.startsWith("asgn_mode_")) {
+      if (data.startsWith("asgn_mode_")) {
         const [_, __, mediaId, mode] = data.split("_");
         if (mode === "standalone") {
             const orderId = `TASK-${Math.floor(1000 + Math.random() * 9000)}`;
             let { data: client } = await supabase.from('clients').select('id').eq('name', 'Internal Factory').single();
             if (!client) { const { data: nc } = await supabase.from('clients').insert([{ name: 'Internal Factory', email: `factory_${Date.now()}@internal.com` }]).select().single(); client = nc; }
+            // Waterfall: Standalone task completes 1-4 and starts 5
             const now = new Date().toISOString();
             const initialWF = { 
               1: { status: 'completed', assignedDays: 0, startDate: now, actualDate: now },
@@ -201,6 +153,7 @@ export async function POST(request: Request) {
         if (order) {
             const wf = order.production_workflow || {};
             const now = new Date().toISOString();
+            // WATERFALL: Complete all previous stages
             for (let i = 1; i < sNum; i++) {
                 if (!wf[i] || (wf[i].status !== 'completed' && wf[i].status !== 'na')) {
                     wf[i] = { ...(wf[i] || { assignedDays: 0 }), status: 'completed', actualDate: now, startDate: wf[i]?.startDate || now };
@@ -209,16 +162,22 @@ export async function POST(request: Request) {
             const currentBudget = wf[sNum]?.assignedDays || 0;
             wf[sNum] = { ...(wf[sNum] || { assignedDays: 0 }), status: 'in_progress', startDate: now };
             await supabase.from('sample_orders').update({ production_workflow: wf }).eq('order_id', orderId);
+            
             if (currentBudget === 0) {
                 await editTelegram(chatId, msgId, `✅ <b>Success!</b>\nOrder: ${orderId}\nStage: ${STAGE_NAMES[sNum]} started.\n\n🔢 Please set the budget below:`);
                 await sendTelegram(chatId, `🔢 <b>Set Budget (Days) for ${STAGE_NAMES[sNum]}</b>\nID: <code>${orderId}</code>\n\nReply with a number (e.g. 5)`, { force_reply: true });
-            } else { await editTelegram(chatId, msgId, `✅ <b>Success!</b>\nOrder: ${orderId}\nStage: ${STAGE_NAMES[sNum]} started.`); }
+            } else {
+                await editTelegram(chatId, msgId, `✅ <b>Success!</b>\nOrder: ${orderId}\nStage: ${STAGE_NAMES[sNum]} started.`);
+            }
         }
       }
-
-      // --- MENU HANDLERS ---
       else if (data === "menu_main") {
-        const mainKeyboard = { inline_keyboard: [[{ text: "📋 List Orders", callback_data: "menu_list" }, { text: "📊 Stats", callback_data: "menu_stats" }], [{ text: "⏳ Pending Tasks", callback_data: "menu_pending" }]] };
+        const mainKeyboard = { 
+  inline_keyboard: [
+    [{ text: "📋 List Orders", callback_data: "menu_list" }, { text: "📊 Stats", callback_data: "menu_stats" }],
+    [{ text: "⏳ Pending Tasks", callback_data: "menu_pending" }]
+  ] 
+};
         await editTelegram(chatId, msgId, "🏠 <b>Admin Dashboard</b>", mainKeyboard);
       }
       else if (data === "menu_stats") {
@@ -235,9 +194,11 @@ export async function POST(request: Request) {
             const activeId = Object.keys(wf).find(k => wf[k].status === 'in_progress');
             if (activeId) {
                 const s = wf[activeId];
-                const due = new Date(new Date(s.startDate).getTime() + (s.assignedDays || 0) * 86400000);
+                const budget = s.assignedDays || 0;
+                const due = new Date(new Date(s.startDate).getTime() + budget * 86400000);
                 const diff = Math.ceil((due.getTime() - new Date().getTime()) / 86400000);
-                response += `👤 ${o.client?.name || 'N/A'} | <code>${o.order_id}</code>\n📍 ${STAGE_NAMES[parseInt(activeId)]} | ${diff >= 0 ? diff + 'd left' : '⚠️ ' + Math.abs(diff) + 'd overdue'}\n\n`;
+                const dueStr = diff >= 0 ? `${diff}d left` : `⚠️ ${Math.abs(diff)}d overdue`;
+                response += `👤 ${o.client?.name || 'N/A'} | <code>${o.order_id}</code>\n📍 ${STAGE_NAMES[parseInt(activeId)]} | ${dueStr}\n\n`;
             }
         });
         await editTelegram(chatId, msgId, response || "✅ No pending tasks.", { inline_keyboard: [[{ text: "⬅️ Back", callback_data: "menu_main" }]] });
@@ -246,8 +207,6 @@ export async function POST(request: Request) {
         const { text, keyboard } = await getOrderList(supabase);
         await editTelegram(chatId, msgId, text, keyboard);
       }
-
-      // --- WORKFLOW BUTTONS ---
       else if (data.startsWith("view_")) {
         const { text, keyboard } = await getOrderDetail(supabase, data.replace("view_", ""));
         await editTelegram(chatId, msgId, text, keyboard);
@@ -263,7 +222,7 @@ export async function POST(request: Request) {
       }
       else if (data.startsWith("wf_prompt_budget_")) {
         const [_, __, ___, oId, sId] = data.split("_");
-        await sendTelegram(chatId, `🔢 <b>Set Budget (Days) for ${STAGE_NAMES[parseInt(sId)]}</b>\nID: <code>${oId}</code>\n\nReply with a number (e.g. 5)`, { force_reply: true });
+        await sendTelegram(chatId, `🔢 <b>Set Budget (Days) for ${STAGE_NAMES[parseInt(sId)]}</b>\nID: <code>${oId}</code>\n\nReply with a number (e.g., 5)`, { force_reply: true });
       }
       else if (data.startsWith("wf_update_")) {
         const [_, __, oId, sId, status] = data.split("_");
@@ -273,8 +232,9 @@ export async function POST(request: Request) {
             const stages = order.production_workflow || {};
             stages[stageNum] = { ...stages[stageNum], status, actualDate: status === 'completed' ? new Date().toISOString() : stages[stageNum].actualDate };
             if (status === 'completed' && stageNum < 5) {
-                if (!stages[stageNum + 1]) stages[stageNum + 1] = { status: 'in_progress', assignedDays: 7, startDate: new Date().toISOString() };
-                else { stages[stageNum + 1].status = 'in_progress'; stages[stageNum + 1].startDate = new Date().toISOString(); }
+                if (!stages[stageNum + 1]) stages[stageNum + 1] = { status: 'pending', assignedDays: 7 };
+                stages[stageNum + 1].startDate = new Date().toISOString();
+                stages[stageNum + 1].status = 'in_progress';
             }
             await supabase.from('sample_orders').update({ production_workflow: stages }).eq('order_id', oId);
             const { text, keyboard } = await getWorkflowHub(supabase, oId);
@@ -301,15 +261,11 @@ export async function POST(request: Request) {
         await sendTelegram(chatId, prompt, { force_reply: true, reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: `view_${oId}` }]] } });
       }
       else if (data.startsWith("attach_")) {
-        const [_, orderId, originalMediaMsgId] = data.split("_");
+        const [_, orderId, mediaId] = data.split("_");
         const mediaMsg = cb.message.reply_to_message;
-        if (!mediaMsg || mediaMsg.message_id.toString() !== originalMediaMsgId) {
-            await sendTelegram(chatId, "⚠️ <b>Context lost.</b> Please reply to the photo again and type /tag.");
-            return NextResponse.json({ ok: true });
-        }
-        const mediaDate = new Date(mediaMsg.date * 1000).toISOString();
-        let fileId = mediaMsg.photo ? mediaMsg.photo[mediaMsg.photo.length - 1].file_id : (mediaMsg.video ? mediaMsg.video.file_id : mediaMsg.document?.file_id);
-        if (fileId) {
+        if (mediaMsg) {
+            const mediaDate = new Date(mediaMsg.date * 1000).toISOString();
+            const fileId = mediaMsg.photo ? mediaMsg.photo[mediaMsg.photo.length - 1].file_id : (mediaMsg.video ? mediaMsg.video.file_id : mediaMsg.document?.file_id);
             await supabase.from('order_media').insert([{ order_id: orderId, file_id: fileId, file_type: 'media', created_at: mediaDate }]);
             const { data: order } = await supabase.from('sample_orders').select('production_workflow').eq('order_id', orderId).single();
             if (order) {
@@ -332,64 +288,7 @@ export async function POST(request: Request) {
 
     if (message.text) {
       const text = message.text;
-      const { data: session } = await supabase.from('tagging_sessions').select('*').eq('user_id', userId).single();
 
-      // --- SESSION CONTROL ---
-      if (session) {
-        if (text.toLowerCase() === 'cancel') {
-          await supabase.from('tagging_sessions').delete().eq('user_id', userId);
-          await sendTelegram(chatId, "❌ Tagging session cancelled.");
-          return NextResponse.json({ ok: true });
-        }
-        if (session.current_field === "WAITING_FOR_STYLE_NAME") {
-          const fields = await getMeasurementTemplate(supabase, session.garment_type);
-          const first = fields[0];
-          const rem = fields.slice(1);
-          await supabase.from('tagging_sessions').update({ style_name: text, current_field: first, remaining_fields: rem }).eq('user_id', userId);
-          await sendTelegram(chatId, generateTagPrompt({ ...session, style_name: text, current_field: first, remaining_fields: rem }));
-          return NextResponse.json({ ok: true });
-        }
-        if (text.toLowerCase() === 'skip') {
-          const next = session.remaining_fields[0];
-          const nextRem = session.remaining_fields.slice(1);
-          if (!next) {
-            await supabase.from('tagging_sessions').delete().eq('user_id', userId);
-            await sendTelegram(chatId, "✅ Tagging Finished.");
-          } else {
-            await supabase.from('tagging_sessions').update({ current_field: next, remaining_fields: nextRem }).eq('user_id', userId);
-            await sendTelegram(chatId, generateTagPrompt({ ...session, current_field: next, remaining_fields: nextRem }));
-          }
-          return NextResponse.json({ ok: true });
-        }
-      }
-
-      // --- CORE COMMANDS ---
-      if (text === "/sample_approved") {
-        await sendTelegram(chatId, "🛠 <b>Sample Approval</b>", { inline_keyboard: [[{ text: "🚀 Start", callback_data: "ts_init_sample" }]] });
-        return NextResponse.json({ ok: true });
-      }
-      if (text === "/production_piece") {
-        await sendTelegram(chatId, "🏭 <b>Production Tagging</b>", { inline_keyboard: [[{ text: "🚀 Start", callback_data: "ts_init_production" }]] });
-        return NextResponse.json({ ok: true });
-      }
-      if (text.startsWith("/pending")) {
-        const { data: orders } = await supabase.from('sample_orders').select('order_id, production_workflow, client:clients(name)').not('status', 'eq', 'dispatched');
-        let response = "⏳ <b>Pending Tasks</b>\n\n";
-        (orders || []).forEach((o: any) => {
-            const wf = o.production_workflow || {};
-            const actId = Object.keys(wf).find(k => wf[k].status === 'in_progress');
-            if (actId) {
-                const s = wf[actId];
-                const due = new Date(new Date(s.startDate).getTime() + (s.assignedDays || 0) * 86400000);
-                const diff = Math.ceil((due.getTime() - new Date().getTime()) / 86400000);
-                response += `👤 <b>${o.client?.name || 'N/A'}</b>\n📦 ${o.order_id} (${STAGE_NAMES[parseInt(actId)]})\n📅 ${diff >= 0 ? '🟢 ' + diff + ' days left' : '🔴 OVERDUE ' + Math.abs(diff) + ' days'}\n\n`;
-            }
-        });
-        await sendTelegram(chatId, response || "✅ No pending tasks found.");
-        return NextResponse.json({ ok: true });
-      }
-
-      // --- REPLY HANDLERS ---
       if (message.reply_to_message?.text?.startsWith('🚚 Dispatching Order:')) {
         const oId = message.reply_to_message.text.match(/(TG-\d+|ORD-\d+|FAC-\d+|TASK-\d+)/)?.[0];
         if (text.toLowerCase() === 'cancel') { await sendTelegram(chatId, "❌ Dispatch cancelled."); return NextResponse.json({ ok: true }); }
@@ -431,34 +330,34 @@ export async function POST(request: Request) {
         const buttons = (orders || []).map((o: any) => ([{ text: `${o.order_id} | ${o.client?.name || 'Client'}`, callback_data: `attach_${o.order_id}_${mediaMsg.message_id}` }]));
         await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, { chat_id: chatId, text: "📎 <b>Tag media to:</b>", parse_mode: 'HTML', reply_to_message_id: mediaMsg.message_id, reply_markup: { inline_keyboard: buttons } });
       }
+      else if (text.startsWith("/pending")) {
+        const { data: orders } = await supabase.from('sample_orders').select('order_id, production_workflow, client:clients(name)').not('status', 'eq', 'dispatched');
+        let response = "⏳ <b>Live Pending Tasks</b>\n\n";
+        (orders || []).forEach((o: any) => {
+            const wf = o.production_workflow || {};
+            const activeId = Object.keys(wf).find(k => wf[k].status === 'in_progress');
+            if (activeId) {
+                const s = wf[activeId];
+                const budget = s.assignedDays || 0;
+                const due = new Date(new Date(s.startDate).getTime() + budget * 86400000);
+                const diff = Math.ceil((due.getTime() - new Date().getTime()) / 86400000);
+                const dueStr = diff >= 0 ? `🟢 ${diff} days left` : `🔴 OVERDUE ${Math.abs(diff)} days`;
+                response += `👤 <b>${o.client?.name || 'N/A'}</b>\n📦 ${o.order_id} (${STAGE_NAMES[parseInt(activeId)]})\n📅 ${dueStr}\n\n`;
+            }
+        });
+        await sendTelegram(chatId, response || "✅ No pending tasks found.");
+      }
       else if (text === "/start" || text.toLowerCase() === "menu") {
-        const mainKeyboard = { inline_keyboard: [[{ text: "📋 List Orders", callback_data: "menu_list" }, { text: "📊 Stats", callback_data: "menu_stats" }], [{ text: "⏳ Pending Tasks", callback_data: "menu_pending" }]] };
+        const mainKeyboard = { 
+          inline_keyboard: [
+            [{ text: "📋 List Orders", callback_data: "menu_list" }, { text: "📊 Stats", callback_data: "menu_stats" }],
+            [{ text: "⏳ Pending Tasks", callback_data: "menu_pending" }]
+          ] 
+        };
         await sendTelegram(chatId, "👋 <b>Garment Admin Dashboard</b>", mainKeyboard);
       }
     }
 
-    // --- TAGGING PHOTO HANDLER ---
-    const mediaObj = message.photo || message.video || message.document;
-    if (mediaObj && message.reply_to_message) {
-      const { data: session } = await supabase.from('tagging_sessions').select('*').eq('user_id', userId).single();
-      if (session && session.current_field !== "WAITING_FOR_STYLE_NAME") {
-        const fileId = message.photo ? message.photo[message.photo.length - 1].file_id : (message.video ? message.video.file_id : message.document.file_id);
-        const table = session.session_type === "sample" ? "sample_measurements" : "production_measurements";
-        await supabase.from(table).insert([{ client_id: session.client_id, order_id: session.order_id, temp_entry_id: session.temp_entry_id, garment_type: session.garment_type, style_name: session.style_name, measurement_type: session.current_field, file_id: fileId }]);
-        const next = session.remaining_fields[0];
-        const nextRem = session.remaining_fields.slice(1);
-        if (!next) {
-            await supabase.from('tagging_sessions').delete().eq('user_id', userId);
-            await sendTelegram(chatId, `✅ <b>Tagging Completed!</b>\nStyle: ${session.style_name}`);
-        } else {
-            await supabase.from('tagging_sessions').update({ current_field: next, remaining_fields: nextRem }).eq('user_id', userId);
-            await sendTelegram(chatId, generateTagPrompt({ ...session, current_field: next, remaining_fields: nextRem }));
-        }
-        return NextResponse.json({ ok: true });
-      }
-    }
-
-    // --- EXCEL IMPORT ---
     if (message.document && message.document.file_name?.endsWith('.xlsx')) {
         const fileRes = await axios.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${message.document.file_id}`);
         const response = await axios.get(`https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileRes.data.result.file_path}`, { responseType: 'arraybuffer' });
@@ -469,7 +368,7 @@ export async function POST(request: Request) {
             if (!client) { const { data: nc } = await supabase.from('clients').insert([{ name: rows[0].client_name, email: clientEmail }]).select().single(); client = nc; }
             const initialWF = { 5: { status: 'in_progress', assignedDays: 7, startDate: new Date().toISOString() } };
             const { data: order } = await supabase.from('sample_orders').insert([{ client_id: client?.id, order_id: `TG-${Math.floor(1000 + Math.random() * 9000)}`, status: 'submitted', production_workflow: initialWF }]).select().single();
-            if (order) { await supabase.from('order_styles').insert(rows.map((r: any) => ({ order_id: order.id, style_name: r.style_name, quantity: r.quantity }))); await sendTelegram(chatId, `✅ <b>Order Imported via Excel.</b>`); }
+            if (order) { await supabase.from('order_styles').insert(rows.map((r: any) => ({ order_id: order.id, style_name: r.style_name, quantity: r.quantity }))); await sendTelegram(chatId, `✅ <b>Order Imported.</b>`); }
         }
     }
     return NextResponse.json({ ok: true });
