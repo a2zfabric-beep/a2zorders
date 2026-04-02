@@ -335,34 +335,70 @@ export async function POST(request: Request) {
           { force_reply: true }
         );
       }
+      // REPLACE WITH:
       else if (data.startsWith("wf_update_")) {
         const [_, __, oId, sId, status] = data.split("_");
         const stageNum = parseInt(sId);
         const { data: order } = await supabase.from('sample_orders').select('production_workflow').eq('order_id', oId).single();
         if (order) {
             const stages = order.production_workflow || {};
-            stages[stageNum] = { ...stages[stageNum], status, actualDate: status === 'completed' ? new Date().toISOString() : stages[stageNum].actualDate };
+            // Guard: prior stage must be completed or na before this one can be completed
+            if (status === 'completed' && stageNum > 1) {
+              const prev = stages[stageNum - 1];
+              if (!prev || (prev.status !== 'completed' && prev.status !== 'na')) {
+                await editTelegram(chatId, msgId,
+                  `⛔ <b>Cannot complete ${STAGE_NAMES[stageNum]}</b>\n\n<b>${STAGE_NAMES[stageNum - 1]}</b> must be completed first.`,
+                  { inline_keyboard: [[{ text: `⬅️ Back to Hub`, callback_data: `wf_hub_${oId}` }]] }
+                );
+                return NextResponse.json({ ok: true });
+              }
+            }
+            const now = new Date().toISOString();
+            stages[stageNum] = {
+              ...stages[stageNum],
+              status,
+              actualDate: status === 'completed' ? (stages[stageNum].actualDate || now) : stages[stageNum].actualDate,
+              startDate: stages[stageNum].startDate || now,
+            };
             if (status === 'completed' && stageNum < 5) {
-                if (!stages[stageNum + 1]) stages[stageNum + 1] = { status: 'in_progress', assignedDays: 7, startDate: new Date().toISOString() };
-                else { stages[stageNum + 1].status = 'in_progress'; stages[stageNum + 1].startDate = new Date().toISOString(); }
+                if (!stages[stageNum + 1]) stages[stageNum + 1] = { status: 'in_progress', assignedDays: 0, startDate: now };
+                else { stages[stageNum + 1].status = 'in_progress'; stages[stageNum + 1].startDate = stages[stageNum + 1].startDate || now; }
             }
             await supabase.from('sample_orders').update({ production_workflow: stages }).eq('order_id', oId);
             const { text, keyboard } = await getWorkflowHub(supabase, oId);
             if (keyboard) await editTelegram(chatId, msgId, text, keyboard);
         }
       }
+      // REPLACE WITH:
       else if (data.startsWith("wf_reset_")) {
         const [_, __, oId, sId] = data.split("_");
         const stageNum = parseInt(sId);
         const { data: order } = await supabase.from('sample_orders').select('status, production_workflow').eq('order_id', oId).single();
         if (order) {
             const stages = order.production_workflow || {};
-            stages[stageNum] = { ...stages[stageNum], status: 'pending', actualDate: null };
+            // Block reset if any later stage is not pending
+            let blockingStage = 0;
+            for (let i = stageNum + 1; i <= 5; i++) {
+              if (stages[i] && stages[i].status !== 'pending') { blockingStage = i; break; }
+            }
+            if (blockingStage > 0) {
+              await editTelegram(chatId, msgId,
+                `⛔ <b>Cannot Reset ${STAGE_NAMES[stageNum]}</b>\n\n<b>${STAGE_NAMES[blockingStage]}</b> is still active.\nReset Stage ${blockingStage} first, then come back.`,
+                { inline_keyboard: [[{ text: `🔄 Go to Stage ${blockingStage}`, callback_data: `wf_stage_${oId}_${blockingStage}` }], [{ text: "⬅️ Back to Hub", callback_data: `wf_hub_${oId}` }]] }
+              );
+              return NextResponse.json({ ok: true });
+            }
+            // Cascade reset: reset target stage and all later stages
+            for (let i = stageNum; i <= 5; i++) {
+              stages[i] = { ...(stages[i] || {}), status: 'pending', actualDate: null, startDate: null };
+            }
+            // Special: preserve mode/poConfirmed clearing for stage 1
+            if (stageNum === 1) stages[1] = { ...stages[1], mode: null, poConfirmed: false };
             let newStatus = order.status;
-            if (stageNum === 5 && order.status === 'ready') newStatus = 'sampling_in_progress';
+            if (order.status === 'ready') newStatus = 'sampling_in_progress';
             await supabase.from('sample_orders').update({ production_workflow: stages, status: newStatus }).eq('order_id', oId);
-            const { text, keyboard } = await getStageDetail(supabase, oId, stageNum);
-            await editTelegram(chatId, msgId, text, keyboard);
+            const { text, keyboard } = await getWorkflowHub(supabase, oId);
+            if (keyboard) await editTelegram(chatId, msgId, `✅ <b>Stage ${stageNum} reset.</b> All subsequent stages cleared.\n\n` + text, keyboard);
         }
       }
       else if (data.startsWith("dispatch_prompt_")) {

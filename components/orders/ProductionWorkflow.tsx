@@ -89,20 +89,34 @@ export default function ProductionWorkflow({ order }: { order: any }) {
   };
 
   // --- STRICT WATERFALL RESET LOGIC ---
+  // REPLACE WITH:
   const canReset = (id: number) => {
     if (stages[id].status === 'pending') return false;
-    if (id === 5) return true;
-    return stages[id + 1].status === 'pending';
+    // Block reset if ANY later stage is not pending
+    for (let i = id + 1; i <= 5; i++) {
+      if (stages[i] && stages[i].status !== 'pending') return false;
+    }
+    return true;
   };
 
   const handleReset = (id: number) => {
     if (!canReset(id)) {
-      alert(`Common Sense Logic: You cannot reset Stage ${id} because Stage ${id + 1} is already active. Reset Stage ${id + 1} first.`);
+      // Find the furthest active stage to give a clear message
+      let blockingStage = id + 1;
+      for (let i = 5; i > id; i--) {
+        if (stages[i] && stages[i].status !== 'pending') { blockingStage = i; break; }
+      }
+      alert(`Cannot reset Stage ${id} (${STAGE_NAMES_WEB[id]}). Stage ${blockingStage} (${STAGE_NAMES_WEB[blockingStage]}) is still active. Reset later stages first.`);
       return;
     }
     const newStages = { ...stages };
-    newStages[id] = { ...newStages[id], status: 'pending', actualDate: null, poConfirmed: false, mode: id === 1 ? null : undefined };
-    if (id < 5) newStages[id + 1] = { ...newStages[id + 1], startDate: null };
+    // Reset the target stage
+    newStages[id] = { ...newStages[id], status: 'pending', actualDate: null, startDate: null, poConfirmed: false, mode: id === 1 ? null : undefined };
+    // Cascade: clear startDate of all subsequent stages (they should already be pending due to canReset guard)
+    for (let i = id + 1; i <= 5; i++) {
+      newStages[i] = { ...newStages[i], status: 'pending', actualDate: null, startDate: null };
+    }
+    setExpandedStage(id);
     setStages(newStages);
     saveWorkflow(newStages);
   };
@@ -120,6 +134,11 @@ export default function ProductionWorkflow({ order }: { order: any }) {
 
   const assignedTotal = Object.values(stages).reduce((a, b) => a + (Number(b.assignedDays) || 0), 0);
   const minAllowedDate = order?.created_at ? new Date(order.created_at).toISOString().split('T')[0] : '';
+
+  // REPLACE WITH:
+  const STAGE_NAMES_WEB: Record<number, string> = {
+    1: "Fabric Procurement", 2: "Dyeing Stage", 3: "Printing Stage", 4: "Embroidery Stage", 5: "Pattern & Sampling"
+  };
 
   return (
     <div className="space-y-6 pb-20 no-scrollbar relative">
