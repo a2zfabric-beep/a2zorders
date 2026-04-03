@@ -264,6 +264,8 @@ export async function POST(request: Request) {
             garment_type: gType, style_name: styleName,
             remaining_fields: fields, current_field: "READY_FOR_MEDIA"
         }]);
+        // ADD this line right before it:
+        await supabase.from('debug_log').insert([{ context: 'ts_style_sel', payload: { clientName, effectiveOrderId, styleName, type, clientId } }]);
         await editTelegram(chatId, msgId, `📸 <b>Session Started: ${styleName}</b>\n\nRequired: <i>${fields.join(', ')}</i>\n\n📁 Dropbox folders ready.\n👉 Reply to any photo with <code>/map</code> to assign it.`);
       }
       // REPLACE WITH:
