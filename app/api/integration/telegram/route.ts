@@ -41,6 +41,69 @@ function calculateSpent(start: string, end?: string) {
   return Math.max(0, Math.floor((e - s) / (1000 * 3600 * 24)));
 }
 
+// REPLACE WITH:
+
+// --- DROPBOX HELPERS ---
+const DROPBOX_TOKEN = process.env.DROPBOX_ACCESS_TOKEN;
+
+async function dbxEnsureFolder(path: string) {
+  try {
+    await axios.post('https://api.dropboxapi.com/2/files/create_folder_v2',
+      { path, autorename: false },
+      { headers: { Authorization: `Bearer ${DROPBOX_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (err: any) {
+    // 409 = folder already exists — that's fine, ignore
+    if (err.response?.status !== 409) {
+      console.error('Dropbox folder error:', path, err.response?.data || err.message);
+    }
+  }
+}
+
+async function dbxUploadFile(dropboxPath: string, fileBuffer: Buffer) {
+  try {
+    await axios.post('https://content.dropboxapi.com/2/files/upload',
+      fileBuffer,
+      {
+        headers: {
+          Authorization: `Bearer ${DROPBOX_TOKEN}`,
+          'Content-Type': 'application/octet-stream',
+          'Dropbox-API-Arg': JSON.stringify({ path: dropboxPath, mode: 'add', autorename: true, mute: false }),
+        }
+      }
+    );
+  } catch (err: any) {
+    console.error('Dropbox upload error:', dropboxPath, err.response?.data || err.message);
+  }
+}
+
+async function ensureTaggingFolders(sessionType: string, clientName: string, orderId: string, styleName: string) {
+  const root = `/${sessionType === 'sample' ? 'Sample Approved' : 'Production Pieces'}`;
+  const clientPath = `${root}/${clientName}`;
+  const orderPath = `${clientPath}/${orderId}`;
+  const stylePath = `${orderPath}/${styleName}`;
+  // Each call is idempotent — 409 = already exists, silently ignored
+  await dbxEnsureFolder(root);
+  await dbxEnsureFolder(clientPath);
+  await dbxEnsureFolder(orderPath);
+  await dbxEnsureFolder(stylePath);
+  return stylePath;
+}
+
+async function getTelegramFileBuffer(fileId: string): Promise<{ buffer: Buffer; ext: string } | null> {
+  try {
+    const fileRes = await axios.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${fileId}`);
+    const filePath: string = fileRes.data.result.file_path;
+    const ext = filePath.split('.').pop() || 'jpg';
+    const fileRes2 = await axios.get(`https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${filePath}`, { responseType: 'arraybuffer' });
+    const buffer = Buffer.from(fileRes2.data as ArrayBuffer);
+    return { buffer, ext };
+  } catch (err: any) {
+    console.error('Telegram file fetch error:', err.message);
+    return null;
+  }
+}
+
 // --- TAGGING SYSTEM HELPERS ---
 async function getMeasurementTemplate(supabase: any, garmentType: string) {
   const { data } = await supabase.from('measurement_templates').select('fields').eq('garment_type', garmentType).single();
@@ -168,39 +231,71 @@ export async function POST(request: Request) {
         buttons.push([{ text: "➕ Enter New Style Name", callback_data: `ts_style_new_${type}_${clientId}_${orderId}_${gType}` }]);
         await editTelegram(chatId, msgId, `👕 <b>Select Style for ${gType}:</b>`, { inline_keyboard: buttons });
       }
+      // REPLACE WITH:
       else if (data.startsWith("ts_style_new_")) {
         const [_, __, ___, type, clientId, orderId, gType] = data.split("_");
         const tempId = orderId === "NEW" ? "TEMP-" + Date.now() : null;
+        const effectiveOrderId = orderId === "NEW" ? tempId : orderId;
+        const { data: clientData } = await supabase.from('clients').select('name').eq('id', clientId).single();
+        const clientName = clientData?.name || clientId;
         await supabase.from('tagging_sessions').delete().eq('user_id', adminId);
         await supabase.from('tagging_sessions').insert([{
-            user_id: adminId, session_type: type, client_id: clientId,
-            order_id: orderId === "NEW" ? null : orderId, temp_entry_id: tempId, garment_type: gType,
+            user_id: adminId, session_type: type, client_id: clientId, client_name: clientName,
+            order_id: orderId === "NEW" ? null : orderId, temp_entry_id: tempId,
+            dropbox_order_id: effectiveOrderId, garment_type: gType,
             remaining_fields: [], current_field: "WAITING_FOR_STYLE_NAME"
         }]);
         await editTelegram(chatId, msgId, `✍️ <b>Type Style Name now:</b>`);
       }
+      // REPLACE WITH:
       else if (data.startsWith("ts_style_sel_")) {
         const [_, __, ___, type, clientId, orderId, gType, styleName] = data.split("_");
         const fields = await getMeasurementTemplate(supabase, gType);
+        // Fetch client name for Dropbox folder
+        const { data: clientData } = await supabase.from('clients').select('name').eq('id', clientId).single();
+        const clientName = clientData?.name || clientId;
+        const effectiveOrderId = orderId === 'NEW' ? `TEMP-${Date.now()}` : orderId;
+        // Create Dropbox folder hierarchy (idempotent)
+        await ensureTaggingFolders(type, clientName, effectiveOrderId, styleName);
         await supabase.from('tagging_sessions').delete().eq('user_id', adminId);
         await supabase.from('tagging_sessions').insert([{
-            user_id: adminId, session_type: type, client_id: clientId,
-            order_id: orderId, garment_type: gType, style_name: styleName,
+            user_id: adminId, session_type: type, client_id: clientId, client_name: clientName,
+            order_id: orderId === 'NEW' ? null : orderId, dropbox_order_id: effectiveOrderId,
+            garment_type: gType, style_name: styleName,
             remaining_fields: fields, current_field: "READY_FOR_MEDIA"
         }]);
-        await editTelegram(chatId, msgId, `📸 <b>Session Started: ${styleName}</b>\n\nRequired: <i>${fields.join(', ')}</i>\n\n👉 <b>HOW TO MAP:</b>\nReply to any photo with <code>/map</code> to assign it to a measurement.`);
+        await editTelegram(chatId, msgId, `📸 <b>Session Started: ${styleName}</b>\n\nRequired: <i>${fields.join(', ')}</i>\n\n📁 Dropbox folders ready.\n👉 Reply to any photo with <code>/map</code> to assign it.`);
       }
+      // REPLACE WITH:
       else if (data.startsWith("ts_set_field_")) {
         const fieldName = data.replace("ts_set_field_", "");
         const originalMsg = cb.message.reply_to_message;
         if (!originalMsg) { await answerCallback(cb.id, "⚠️ Error: Reply to the photo!"); return NextResponse.json({ ok: true }); }
         const { data: session } = await supabase.from('tagging_sessions').select('*').eq('user_id', adminId).single();
         if (session) {
-            const fileId = originalMsg.photo ? originalMsg.photo[originalMsg.photo.length - 1].file_id : (originalMsg.video ? originalMsg.video.file_id : originalMsg.document.file_id);
+            const isPhoto = !!originalMsg.photo;
+            const isVideo = !!originalMsg.video;
+            const fileId = isPhoto ? originalMsg.photo[originalMsg.photo.length - 1].file_id : (isVideo ? originalMsg.video.file_id : originalMsg.document.file_id);
             const table = session.session_type === "sample" ? "sample_measurements" : "production_measurements";
             await supabase.from(table).insert([{ client_id: session.client_id, order_id: session.order_id, temp_entry_id: session.temp_entry_id, garment_type: session.garment_type, style_name: session.style_name, measurement_type: fieldName, file_id: fileId }]);
             const newRem = session.remaining_fields.filter((f: string) => f !== fieldName);
             await supabase.from('tagging_sessions').update({ remaining_fields: newRem }).eq('user_id', adminId);
+
+            // --- DROPBOX UPLOAD ---
+            const fileData: any = await getTelegramFileBuffer(fileId);
+            if (fileData && session.client_name && session.style_name) {
+              const stylePath = await ensureTaggingFolders(
+                session.session_type,
+                session.client_name,
+                session.dropbox_order_id || session.order_id || session.temp_entry_id,
+                session.style_name
+              );
+              // Filename: fieldName-originalFilename e.g. "Chest-photo.jpg"
+              const safeField = fieldName.replace(/[^a-zA-Z0-9]/g, '_');
+              const dropboxPath = `${stylePath}/${safeField}.${fileData.ext}`;
+              await dbxUploadFile(dropboxPath, fileData.buffer);
+            }
+
             await editTelegram(chatId, msgId, `✅ <b>${fieldName} Saved!</b>\nMap next photo or press FINISH.`, generateMeasurementKeyboard({...session, remaining_fields: newRem}));
         }
       }
@@ -454,14 +549,22 @@ export async function POST(request: Request) {
       }
 
       // --- 2. SESSION STYLE NAME INPUT ---
+      // REPLACE WITH:
       if (session && session.current_field === "WAITING_FOR_STYLE_NAME") {
         if (text.toLowerCase() === 'cancel') {
           await supabase.from('tagging_sessions').delete().eq('user_id', userId);
           await sendTelegram(chatId, "❌ Session cancelled.");
         } else {
           const fields = await getMeasurementTemplate(supabase, session.garment_type);
+          // Now style name is known — create Dropbox folders
+          await ensureTaggingFolders(
+            session.session_type,
+            session.client_name || session.client_id,
+            session.dropbox_order_id || session.order_id || session.temp_entry_id,
+            text
+          );
           await supabase.from('tagging_sessions').update({ style_name: text, current_field: "READY_FOR_MEDIA", remaining_fields: fields }).eq('user_id', userId);
-          await sendTelegram(chatId, `📸 <b>Session Started: ${text}</b>\n\nReply to any tech photo with <code>/map</code> to begin.`);
+          await sendTelegram(chatId, `📸 <b>Session Started: ${text}</b>\n\n📁 Dropbox folders ready.\nReply to any tech photo with <code>/map</code> to begin.`);
         }
         return NextResponse.json({ ok: true });
       }
