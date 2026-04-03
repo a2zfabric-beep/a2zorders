@@ -237,13 +237,17 @@ export async function GET() {
 
     if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
 
+    // REPLACE WITH:
     const transformed = orders.map(o => ({
       id: o.id,
       order_id: o.order_id,
       client_name: o.clients?.name || '',
       style_count: o.order_styles?.length || 0,
       status: o.status,
-      created_at: o.created_at
+      created_at: o.created_at,
+      delivery_date: o.delivery_date || null,
+      dispatched_at: o.dispatched_at || null,
+      production_workflow: o.production_workflow || null,
     }));
 
     return NextResponse.json({ success: true, data: transformed });

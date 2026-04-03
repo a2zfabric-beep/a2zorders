@@ -50,15 +50,15 @@ export default function DashboardPage() {
     
     if (completedTasks.length === 0) return { rate: 0, onTime: 0, delayed: 0, total: 0 };
 
+    // REPLACE WITH:
     const onTimeCount = completedTasks.filter(o => {
       const s = o.production_workflow[stageId];
-      if (!s.startDate || !s.actualDate) return true;
-      
-      const start = new Date(s.startDate).setHours(0,0,0,0);
-      const end = new Date(s.actualDate).setHours(0,0,0,0);
+      if (!s.startDate || !s.actualDate) return false;
+      if (!s.assignedDays || s.assignedDays === 0) return false; // no budget = can't judge
+      const start = new Date(s.startDate).setHours(0, 0, 0, 0);
+      const end = new Date(s.actualDate).setHours(0, 0, 0, 0);
       const used = Math.floor((end - start) / (1000 * 3600 * 24));
-      
-      return used <= (s.assignedDays || 0);
+      return used <= s.assignedDays;
     }).length;
 
     const delayedCount = completedTasks.length - onTimeCount;
@@ -75,9 +75,12 @@ export default function DashboardPage() {
 
   // PERFORMANCE BREAKDOWN
   const completed = orders.filter(o => o.status === 'dispatched');
+  // REPLACE WITH:
   const onTime = completed.filter(o => {
-    if (!o.delivery_date || !o.dispatched_at) return true;
-    return new Date(o.dispatched_at) <= new Date(o.delivery_date);
+    if (!o.delivery_date || !o.dispatched_at) return false;
+    const dispatched = new Date(o.dispatched_at).setHours(0, 0, 0, 0);
+    const target = new Date(o.delivery_date).setHours(0, 0, 0, 0);
+    return dispatched <= target;
   });
   
   const late = completed.length - onTime.length;
