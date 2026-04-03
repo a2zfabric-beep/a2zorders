@@ -132,13 +132,13 @@ export default function ProductionWorkflow({ order }: { order: any }) {
     return prev.status !== 'completed' && prev.status !== 'na';
   };
 
-  const assignedTotal = Object.values(stages).reduce((a, b) => a + (Number(b.assignedDays) || 0), 0);
-  const minAllowedDate = order?.created_at ? new Date(order.created_at).toISOString().split('T')[0] : '';
-
   // REPLACE WITH:
   const STAGE_NAMES_WEB: Record<number, string> = {
     1: "Fabric Procurement", 2: "Dyeing Stage", 3: "Printing Stage", 4: "Embroidery Stage", 5: "Pattern & Sampling"
   };
+
+  const assignedTotal = Object.values(stages).reduce((a, b) => a + (Number(b.assignedDays) || 0), 0);
+  const minAllowedDate = order?.created_at ? new Date(order.created_at).toISOString().split('T')[0] : '';
 
   return (
     <div className="space-y-6 pb-20 no-scrollbar relative">
