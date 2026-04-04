@@ -335,19 +335,15 @@ export async function POST(request: Request) {
           : new Date().toISOString();
 
         if (mode === "standalone") {
-          // Standalone: just create task directly with media date as start
-          const taskId = `TASK-${Math.floor(1000 + Math.random() * 9000)}`;
+          // Standalone: prompt for assign-to and nature of task
+          const startDateDisplay = new Date(mediaDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
           const fileId = cb.message.reply_to_message?.photo
             ? cb.message.reply_to_message.photo[cb.message.reply_to_message.photo.length - 1].file_id
             : cb.message.reply_to_message?.video?.file_id || cb.message.reply_to_message?.document?.file_id || null;
-          await supabase.from('tasks').insert([{
-            task_id: taskId, is_standalone: true, status: 'pending',
-            start_date: mediaDate, start_file_id: fileId,
-            title: `Standalone Task ${taskId}`
-          }]);
-          await editTelegram(chatId, msgId,
-            `✅ <b>Standalone Task Created</b>\n🆔 <code>${taskId}</code>\n📅 Started: ${new Date(mediaDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}\n\nUse /complete to mark it done.`,
-            { inline_keyboard: [[{ text: "⬅️ Menu", callback_data: "menu_main" }]] }
+          await sendTelegram(
+            chatId,
+            `🆕 <b>Standalone Task</b>\n📅 Start: <b>${startDateDisplay}</b>\n\nReply with:\n<code>Assign To | Nature of Task</code>\n\n<i>Example: Rahul | Stitching of sample batch</i>\n\nType <b>cancel</b> to abort.\n\n__STASK__${mediaDate}__${fileId || ''}__`,
+            { force_reply: true }
           );
         } else {
           // Linked: select client first
@@ -438,6 +434,23 @@ export async function POST(request: Request) {
             { inline_keyboard: [[{ text: "⬅️ Menu", callback_data: "menu_main" }]] }
           );
         }
+      }
+
+      // --- STANDALONE TASK: set date prompt ---
+      else if (data.startsWith("stask_setdate_")) {
+        const parts = data.split("_");
+        const dateType = parts[parts.length - 1]; // "start" or "end"
+        const taskId = parts.slice(2, parts.length - 1).join("_");
+        const label = dateType === "start" ? "Start Date" : "Completion Date";
+        await sendTelegram(chatId,
+          `📅 <b>Set ${label}</b> for <code>${taskId}</code>\n\nReply with date:\n<code>DD-MM-YYYY</code>\n\n__STASK_DATE__${taskId}_${dateType}__`,
+          { force_reply: true }
+        );
+      }
+
+      // --- STANDALONE TASK: auto-complete via /complete ---
+      else if (data.startsWith("task_done_") && cb.message.reply_to_message) {
+        // handled below — skip, fall through to existing handler
       }
 
       // --- 3. MENU & HUB ---
@@ -758,7 +771,66 @@ export async function POST(request: Request) {
         return NextResponse.json({ ok: true });
       }
 
-      // REPLACE WITH:
+      // --- STANDALONE TASK: details reply handler ---
+      if (message.reply_to_message?.text?.includes('__STASK__')) {
+        const replyText = message.reply_to_message.text;
+        if (text.toLowerCase() === 'cancel') {
+          await sendTelegram(chatId, "❌ Standalone task cancelled.");
+          return NextResponse.json({ ok: true });
+        }
+        const staskMatch = replyText.match(/__STASK__([^_]+(?:T[^_]+)?)__([^_]*)__/);
+        const mediaDate = staskMatch?.[1] || new Date().toISOString();
+        const fileId = staskMatch?.[2] || null;
+
+        const parts = text.split('|').map((p: string) => p.trim());
+        if (parts.length < 2 || !parts[0] || !parts[1]) {
+          await sendTelegram(chatId, `⚠️ Use format:\n<code>Assign To | Nature of Task</code>`, { force_reply: true });
+          return NextResponse.json({ ok: true });
+        }
+        const assignedTo = parts[0];
+        const taskDescription = parts.slice(1).join('|').trim();
+        const taskId = `TASK-${Math.floor(1000 + Math.random() * 9000)}`;
+
+        await supabase.from('tasks').insert([{
+          task_id: taskId, is_standalone: true, status: 'pending',
+          start_date: mediaDate, start_file_id: fileId || null,
+          title: taskDescription, assigned_to: assignedTo, description: taskDescription
+        }]);
+
+        const startDisplay = new Date(mediaDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+        await sendTelegram(chatId,
+          `✅ <b>Standalone Task Created</b>\n🆔 <code>${taskId}</code>\n👤 <b>${assignedTo}</b>\n📋 <b>${taskDescription}</b>\n📅 Started: ${startDisplay}`,
+          { inline_keyboard: [
+            [{ text: "📅 Change Start Date", callback_data: `stask_setdate_${taskId}_start` }],
+            [{ text: "🏁 Set Completion Date", callback_data: `stask_setdate_${taskId}_end` }],
+            [{ text: "⬅️ Menu", callback_data: "menu_main" }]
+          ]}
+        );
+        return NextResponse.json({ ok: true });
+      }
+
+      // --- STANDALONE TASK: manual date reply handler ---
+      if (message.reply_to_message?.text?.includes('__STASK_DATE__')) {
+        const replyText = message.reply_to_message.text;
+        const dateMatch = replyText.match(/__STASK_DATE__(TASK-\d+)_(start|end)__/);
+        if (!dateMatch) return NextResponse.json({ ok: true });
+        const [, taskId, dateType] = dateMatch;
+        const match = text.trim().match(/^(\d{2})-(\d{2})-(\d{4})$/);
+        if (!match) {
+          await sendTelegram(chatId, `⚠️ Invalid format. Use DD-MM-YYYY.`, { force_reply: true });
+          return NextResponse.json({ ok: true });
+        }
+        const [_, d, m, y] = match;
+        const parsedDate = new Date(`${y}-${m}-${d}T00:00:00.000Z`).toISOString();
+        const updatePayload: any = dateType === 'start'
+          ? { start_date: parsedDate }
+          : { completion_date: parsedDate, status: 'completed' };
+        await supabase.from('tasks').update(updatePayload).eq('task_id', taskId);
+        const label = dateType === 'start' ? 'Start Date' : 'Completion Date';
+        await sendTelegram(chatId, `✅ <b>${label} updated</b> for <code>${taskId}</code>\n📅 ${new Date(parsedDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`);
+        return NextResponse.json({ ok: true });
+      }
+
       // --- 5. WORKFLOW HANDLERS ---
       if (text.startsWith("/assign") || text.startsWith("/task")) {
         const mediaMsg = message.reply_to_message;
