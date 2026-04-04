@@ -335,15 +335,13 @@ export async function POST(request: Request) {
           : new Date().toISOString();
 
         if (mode === "standalone") {
-          // Standalone: prompt for assign-to and nature of task
-          const startDateDisplay = new Date(mediaDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
           const fileId = cb.message.reply_to_message?.photo
             ? cb.message.reply_to_message.photo[cb.message.reply_to_message.photo.length - 1].file_id
             : cb.message.reply_to_message?.video?.file_id || cb.message.reply_to_message?.document?.file_id || null;
-          const staskToken = `STASK-${Buffer.from(mediaDate).toString('base64').replace(/=/g, '')}-FID-${fileId || 'null'}`;
-          await sendTelegram(
-            chatId,
-            `🆕 <b>Standalone Task</b>\n📅 Start: <b>${startDateDisplay}</b>\n\nReply with:\n<code>Assign To | Nature of Task</code>\n\n<i>Example: Rahul | Stitching of sample batch</i>\n\nType <b>cancel</b> to abort.\n\n[${staskToken}]`,
+          const startDisplay = new Date(mediaDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+          const token = Buffer.from(JSON.stringify({ mediaDate, fileId: fileId || '' })).toString('base64').replace(/=/g, '');
+          await sendTelegram(chatId,
+            `🆕 <b>Standalone Task</b>\n📅 Start: <b>${startDisplay}</b>\n\nReply with:\n<code>Assign To | Nature of Task | Budget Days</code>\n\n<i>Budget Days = how many days to complete (Day 0 = start day)\nExample: Rahul | Stitching sample batch | 3</i>\n\nBudget days is optional. Type <b>cancel</b> to abort.\n\n[STASK:${token}]`,
             { force_reply: true }
           );
         } else {
@@ -449,9 +447,16 @@ export async function POST(request: Request) {
         );
       }
 
-      // --- STANDALONE TASK: auto-complete via /complete ---
-      else if (data.startsWith("task_done_") && cb.message.reply_to_message) {
-        // handled below — skip, fall through to existing handler
+      // --- STANDALONE TASK: set due date prompt ---
+      else if (data.startsWith("stask_setdate_")) {
+        const parts = data.split("_");
+        const dateType = parts[parts.length - 1];
+        const taskId = parts.slice(2, parts.length - 1).join("_");
+        const label = dateType === "start" ? "Start Date" : "Due Date";
+        await sendTelegram(chatId,
+          `📅 <b>Set ${label}</b> for <code>${taskId}</code>\n\nReply with: <code>DD-MM-YYYY</code>\n\n[STASK_DATE:${taskId}_${dateType}]`,
+          { force_reply: true }
+        );
       }
 
       // --- 3. MENU & HUB ---
@@ -470,50 +475,57 @@ export async function POST(request: Request) {
         const { data: tasks } = await supabase.from('tasks').select('*').eq('status', 'pending').order('created_at', { ascending: false });
         const { data: orders } = await supabase.from('sample_orders').select('order_id, production_workflow, client:clients(name)').not('status', 'eq', 'dispatched');
         let response = "⏳ <b>Pending Tasks</b>\n\n";
+        const todayMs = new Date().setHours(0, 0, 0, 0);
 
-        // Linked tasks from tasks table
-        if (tasks && tasks.length > 0) {
-          response += "🔗 <b>Linked Tasks:</b>\n";
-          tasks.forEach((t: any) => {
-            if (!t.is_standalone) {
-              const startStr = t.start_date ? new Date(t.start_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : 'N/A';
-              response += `📦 <code>${t.order_id}</code> | ${t.stage_name}\n🆔 ${t.task_id} | 📅 ${startStr}\n\n`;
+        const linked = (tasks || []).filter((t: any) => !t.is_standalone);
+        const standalone = (tasks || []).filter((t: any) => t.is_standalone);
+
+        if (standalone.length > 0) {
+          response += "🆕 <b>Standalone Tasks:</b>\n";
+          standalone.forEach((t: any) => {
+            const startStr = t.start_date ? new Date(t.start_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : 'N/A';
+            let dueLine = '📅 No due date set';
+            if (t.completion_date) {
+              const diff = Math.ceil((new Date(t.completion_date).setHours(0,0,0,0) - todayMs) / 86400000);
+              if (diff > 0) dueLine = `🟢 ${diff}d left`;
+              else if (diff === 0) dueLine = `⚠️ Due today`;
+              else dueLine = `🔴 ${Math.abs(diff)}d overdue`;
             }
+            response += `🆔 <code>${t.task_id}</code>\n👤 ${t.assigned_to || 'N/A'} | 📋 ${t.description || t.title || 'N/A'}\n📅 Start: ${startStr} | ${dueLine}\n\n`;
           });
-          const standalone = tasks.filter((t: any) => t.is_standalone);
-          if (standalone.length > 0) {
-            response += "🆕 <b>Standalone Tasks:</b>\n";
-            standalone.forEach((t: any) => {
-              const startStr = t.start_date ? new Date(t.start_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : 'N/A';
-              let dueLine = '';
-              if (t.completion_date) {
-                const diff = Math.ceil((new Date(t.completion_date).getTime() - new Date().setHours(0,0,0,0)) / 86400000);
-                if (diff > 0) dueLine = `\n✅ ${diff}d left`;
-                else if (diff === 0) dueLine = `\n⚠️ Due today`;
-                else dueLine = `\n🔴 ${Math.abs(diff)}d overdue`;
+        }
+
+        if (linked.length > 0) {
+          response += "🔗 <b>Linked Tasks:</b>\n";
+          linked.forEach((t: any) => {
+            const startStr = t.start_date ? new Date(t.start_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : 'N/A';
+            response += `📦 <code>${t.order_id}</code> | ${t.stage_name}\n🆔 ${t.task_id} | 📅 ${startStr}\n\n`;
+          });
+        }
+
+        if (orders && orders.length > 0) {
+          const activeStages = (orders || []).filter((o: any) => {
+            const wf = o.production_workflow || {};
+            return Object.keys(wf).some(k => wf[k].status === 'in_progress');
+          });
+          if (activeStages.length > 0) {
+            response += "⚙️ <b>Active Workflow Stages:</b>\n";
+            activeStages.forEach((o: any) => {
+              const wf = o.production_workflow || {};
+              const actId = Object.keys(wf).find(k => wf[k].status === 'in_progress');
+              if (actId) {
+                const s = wf[actId];
+                const budget = s.assignedDays || 0;
+                const due = new Date(new Date(s.startDate).getTime() + budget * 86400000);
+                const diff = Math.ceil((due.getTime() - todayMs) / 86400000);
+                const dueStr = budget > 0 ? (diff > 0 ? `🟢 ${diff}d left` : diff === 0 ? `⚠️ Due today` : `🔴 ${Math.abs(diff)}d overdue`) : 'No budget set';
+                response += `👤 ${o.client?.name || 'N/A'} | <code>${o.order_id}</code>\n📍 ${STAGE_NAMES[parseInt(actId)]} | ${dueStr}\n\n`;
               }
-              response += `🆔 ${t.task_id}\n👤 ${t.assigned_to || 'N/A'} | 📋 ${t.description || t.title || 'N/A'}\n📅 Started: ${startStr}${dueLine}\n\n`;
             });
           }
         }
 
-        // Also show workflow in_progress stages
-        if (orders && orders.length > 0) {
-          response += "⚙️ <b>Active Workflow Stages:</b>\n";
-          (orders || []).forEach((o: any) => {
-            const wf = o.production_workflow || {};
-            const actId = Object.keys(wf).find(k => wf[k].status === 'in_progress');
-            if (actId) {
-              const s = wf[actId];
-              const budget = s.assignedDays || 0;
-              const due = new Date(new Date(s.startDate).getTime() + budget * 86400000);
-              const diff = Math.ceil((due.getTime() - new Date().getTime()) / 86400000);
-              response += `👤 ${o.client?.name || 'N/A'} | <code>${o.order_id}</code>\n📍 ${STAGE_NAMES[parseInt(actId)]} | ${budget > 0 ? (diff >= 0 ? diff + 'd left' : '⚠️ ' + Math.abs(diff) + 'd overdue') : 'No budget set'}\n\n`;
-            }
-          });
-        }
-
-        if (response === "⏳ <b>Pending Tasks</b>\n\n") response += "✅ All clear — no pending tasks.";
+        if (standalone.length === 0 && linked.length === 0 && response === "⏳ <b>Pending Tasks</b>\n\n") response += "✅ All clear — no pending tasks.";
         await editTelegram(chatId, msgId, response, { inline_keyboard: [[{ text: "⬅️ Back", callback_data: "menu_main" }]] });
       }
       else if (data === "menu_list") {
@@ -780,51 +792,53 @@ export async function POST(request: Request) {
       }
 
       // --- STANDALONE TASK: details reply handler ---
-      if (message.reply_to_message?.text?.includes('[STASK-')) {
+      if (message.reply_to_message?.text?.includes('[STASK:')) {
         const replyText = message.reply_to_message.text;
         if (text.toLowerCase() === 'cancel') {
-          await sendTelegram(chatId, "❌ Standalone task cancelled.");
-          return NextResponse.json({ ok: true });
+          await sendTelegram(chatId, "❌ Cancelled."); return NextResponse.json({ ok: true });
         }
-        const staskMatch = replyText.match(/\[STASK-([A-Za-z0-9+/]+)-FID-([^\]]+)\]/);
+        const tokenMatch = replyText.match(/\[STASK:([A-Za-z0-9+/]+)\]/);
         let mediaDate = new Date().toISOString();
         let fileId: string | null = null;
-        if (staskMatch) {
-          try { mediaDate = Buffer.from(staskMatch[1], 'base64').toString('utf8'); } catch {}
-          fileId = staskMatch[2] === 'null' ? null : staskMatch[2];
+        if (tokenMatch) {
+          try {
+            const decoded = JSON.parse(Buffer.from(tokenMatch[1], 'base64').toString('utf8'));
+            mediaDate = decoded.mediaDate || mediaDate;
+            fileId = decoded.fileId || null;
+          } catch {}
         }
-
         const parts = text.split('|').map((p: string) => p.trim());
         if (parts.length < 2 || !parts[0] || !parts[1]) {
-          await sendTelegram(chatId, `⚠️ Use format:\n<code>Assign To | Nature of Task</code>`, { force_reply: true });
+          await sendTelegram(chatId, `⚠️ Use format:\n<code>Assign To | Nature of Task</code>\nor\n<code>Assign To | Nature of Task | Budget Days</code>`, { force_reply: true });
           return NextResponse.json({ ok: true });
         }
         const assignedTo = parts[0];
-        const taskDescription = parts.slice(1).join('|').trim();
+        const taskDescription = parts[1];
+        const budgetDays = (parts[2] && !isNaN(parseInt(parts[2]))) ? parseInt(parts[2]) : null;
+        const completionDate = budgetDays !== null
+          ? new Date(new Date(mediaDate).getTime() + budgetDays * 86400000).toISOString()
+          : null;
         const taskId = `TASK-${Math.floor(1000 + Math.random() * 9000)}`;
-
         await supabase.from('tasks').insert([{
           task_id: taskId, is_standalone: true, status: 'pending',
           start_date: mediaDate, start_file_id: fileId || null,
-          title: taskDescription, assigned_to: assignedTo, description: taskDescription
+          title: taskDescription, assigned_to: assignedTo,
+          description: taskDescription, budget_days: budgetDays,
+          completion_date: completionDate
         }]);
-
         const startDisplay = new Date(mediaDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+        const dueDisplay = completionDate ? new Date(completionDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not set';
         await sendTelegram(chatId,
-          `✅ <b>Standalone Task Created</b>\n🆔 <code>${taskId}</code>\n👤 <b>${assignedTo}</b>\n📋 <b>${taskDescription}</b>\n📅 Started: ${startDisplay}`,
-          { inline_keyboard: [
-            [{ text: "📅 Change Start Date", callback_data: `stask_setdate_${taskId}_start` }],
-            [{ text: "🏁 Set Completion Date", callback_data: `stask_setdate_${taskId}_end` }],
-            [{ text: "⬅️ Menu", callback_data: "menu_main" }]
-          ]}
+          `✅ <b>Task Created</b>\n🆔 <code>${taskId}</code>\n👤 <b>${assignedTo}</b>\n📋 <b>${taskDescription}</b>\n📅 Start: ${startDisplay}\n🏁 Due: ${dueDisplay}`,
+          { inline_keyboard: [[{ text: "⬅️ Menu", callback_data: "menu_main" }]] }
         );
         return NextResponse.json({ ok: true });
       }
 
       // --- STANDALONE TASK: manual date reply handler ---
-      if (message.reply_to_message?.text?.includes('__STASK_DATE__')) {
+      if (message.reply_to_message?.text?.includes('[STASK_DATE:')) {
         const replyText = message.reply_to_message.text;
-        const dateMatch = replyText.match(/__STASK_DATE__(TASK-\d+)_(start|end)__/);
+        const dateMatch = replyText.match(/\[STASK_DATE:(TASK-\d+)_(start|end)\]/);
         if (!dateMatch) return NextResponse.json({ ok: true });
         const [, taskId, dateType] = dateMatch;
         const match = text.trim().match(/^(\d{2})-(\d{2})-(\d{4})$/);
@@ -836,9 +850,9 @@ export async function POST(request: Request) {
         const parsedDate = new Date(`${y}-${m}-${d}T00:00:00.000Z`).toISOString();
         const updatePayload: any = dateType === 'start'
           ? { start_date: parsedDate }
-          : { completion_date: parsedDate, status: 'completed' };
+          : { completion_date: parsedDate };
         await supabase.from('tasks').update(updatePayload).eq('task_id', taskId);
-        const label = dateType === 'start' ? 'Start Date' : 'Completion Date';
+        const label = dateType === 'start' ? 'Start Date' : 'Due Date';
         await sendTelegram(chatId, `✅ <b>${label} updated</b> for <code>${taskId}</code>\n📅 ${new Date(parsedDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`);
         return NextResponse.json({ ok: true });
       }
@@ -847,9 +861,6 @@ export async function POST(request: Request) {
       if (text.startsWith("/assign") || text.startsWith("/task")) {
         const mediaMsg = message.reply_to_message;
         if (!mediaMsg) { await sendTelegram(chatId, "❌ Reply to a photo, video, or text message with /assign to create a task."); return NextResponse.json({ ok: true }); }
-        const isMedia = !!(mediaMsg.photo || mediaMsg.video || mediaMsg.document);
-        const isText = !!mediaMsg.text;
-        if (!isMedia && !isText) { await sendTelegram(chatId, "❌ Reply to a photo, video, or text message with /assign."); return NextResponse.json({ ok: true }); }
         const mediaDate = new Date(mediaMsg.date * 1000).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
         const keyboard = { inline_keyboard: [
           [{ text: "🆕 Standalone Task", callback_data: `asgn_mode_${mediaMsg.message_id}_standalone` }],
