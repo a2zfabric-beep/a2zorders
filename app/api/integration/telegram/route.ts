@@ -1010,13 +1010,34 @@ export async function POST(request: Request) {
         const fileRes = await axios.get(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${message.document.file_id}`);
         const response = await axios.get(`https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileRes.data.result.file_path}`, { responseType: 'arraybuffer' });
         const workbook = XLSX.read(response.data, { type: 'buffer' });
-        const rows: any[] = XLSX.utils.sheet_to_json(workbook.Sheets[0]);
-        if (rows[0]?.client_email) {
-            let { data: client } = await supabase.from('clients').select('id').eq('email', rows[0].client_email).single();
-            if (!client) { const { data: nc } = await supabase.from('clients').insert([{ name: rows[0].client_name, email: rows[0].client_email }]).select().single(); client = nc; }
+        const sheetName = workbook.SheetNames[0];
+        const rows: any[] = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+        if (!rows || rows.length === 0) {
+            await sendTelegram(chatId, `⚠️ <b>Excel Import Failed</b>\n\nThe file appears to be empty or unreadable.`);
+        } else if (!rows[0]?.client_email) {
+            await sendTelegram(chatId, `⚠️ <b>Excel Import Failed</b>\n\nMissing required field: <code>client_email</code>\n\nRequired columns: <code>client_email</code>, <code>client_name</code>, <code>style_name</code>, <code>quantity</code>`);
+        } else {
+            let { data: client } = await supabase.from('clients').select('id, name').eq('email', rows[0].client_email).single();
+            const isNewClient = !client;
+            if (!client) {
+                const { data: nc } = await supabase.from('clients').insert([{ name: rows[0].client_name, email: rows[0].client_email }]).select().single();
+                client = nc;
+            }
+            const orderId = `TG-${Math.floor(1000 + Math.random() * 9000)}`;
             const initialWF = { 5: { status: 'in_progress', assignedDays: 7, startDate: new Date().toISOString() } };
-            const { data: order } = await supabase.from('sample_orders').insert([{ client_id: client?.id, order_id: `TG-${Math.floor(1000 + Math.random() * 9000)}`, status: 'submitted', production_workflow: initialWF }]).select().single();
-            if (order) { await supabase.from('order_styles').insert(rows.map((r: any) => ({ order_id: order.id, style_name: r.style_name, quantity: r.quantity }))); await sendTelegram(chatId, `✅ <b>Order Imported via Excel.</b>`); }
+            const { data: order, error: orderErr } = await supabase.from('sample_orders').insert([{ client_id: client?.id, order_id: orderId, status: 'submitted', production_workflow: initialWF }]).select().single();
+            if (orderErr || !order) {
+                await sendTelegram(chatId, `❌ <b>Order creation failed</b>\n\n<code>${orderErr?.message || 'Unknown error'}</code>`);
+            } else {
+                const styles = rows.filter((r: any) => r.style_name);
+                await supabase.from('order_styles').insert(styles.map((r: any) => ({ order_id: order.id, style_name: r.style_name, quantity: r.quantity })));
+                const styleLines = styles.map((r: any) => `  • ${r.style_name} — ${r.quantity || 'N/A'} pcs`).join('\n');
+                const clientLabel = client?.name || rows[0].client_name || rows[0].client_email;
+                await sendTelegram(chatId,
+                    `✅ <b>Order Created via Excel</b>\n\n🆔 Order ID: <code>${orderId}</code>\n👤 Client: <b>${clientLabel}</b>${isNewClient ? ' <i>(new)</i>' : ''}\n📧 ${rows[0].client_email}\n\n👕 <b>${styles.length} Style(s):</b>\n${styleLines || '  • No styles found'}\n\n📌 Status: <code>SUBMITTED</code>\n🏗 Stage: Pattern & Sampling started`,
+                    { inline_keyboard: [[{ text: "📋 View Order", callback_data: `view_${orderId}` }, { text: "🏠 Menu", callback_data: "menu_main" }]] }
+                );
+            }
         }
     }
     return NextResponse.json({ ok: true });
