@@ -159,9 +159,7 @@ async function parseFormData(request: NextRequest) {
 export async function POST(request: Request) {
   try {
     // 1. Initialize Supabase Direct (Avoids the "Expected 2-3 arguments" error)
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-    const supabase = createSupabaseDirect(supabaseUrl, supabaseKey);
+    const supabase = getSupabaseAdmin();
 
     const body = await request.json();
     const { client_id, new_client_name, new_client_email, styles } = body;
