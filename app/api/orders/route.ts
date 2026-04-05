@@ -265,23 +265,12 @@ export async function DELETE(request: Request) {
       return NextResponse.json({ success: false, error: "Order ID is required" }, { status: 400 });
     }
 
-    // DIRECT INITIALIZATION: Bypasses the server helper to ensure env variables are read
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    const supabaseAdmin = getSupabaseAdmin(); // use SERVICE_ROLE_KEY, not ANON_KEY
 
-    if (!supabaseUrl || !supabaseKey) {
-       return NextResponse.json({ 
-         success: false, 
-         error: "API Environment Error: NEXT_PUBLIC_SUPABASE_URL is missing. Please check your .env.local file." 
-       }, { status: 500 });
-    }
-
-    const supabase = createSupabaseDirect(supabaseUrl, supabaseKey);
-
-    const { error } = await supabase
-      .from('sample_orders') 
-      .delete()
-      .eq('id', id);
+    const { error } = await supabaseAdmin
+      .from('sample_orders')
+      .update({ is_deleted: true, updated_at: new Date().toISOString() })
+      .eq('id', parseInt(id));
 
     if (error) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
