@@ -181,15 +181,17 @@ export async function POST(request: Request) {
       if (existing) {
         resolvedClientId = existing.id;
       } else {
-        const { data: newClient, error: createErr } = await supabase
-          .from('clients')
-          .insert([{ name: new_client_name.trim(), email: new_client_email.trim() }])
-          .select()
-          .single();
-        if (createErr || !newClient) {
-          return NextResponse.json({ success: false, error: `Failed to create client: ${createErr?.message}` }, { status: 500 });
-        }
-        resolvedClientId = newClient.id;
+        console.log('DEBUG: Attempting to create client:', new_client_name.trim(), new_client_email.trim());
+      const { data: newClient, error: createErr } = await supabase
+        .from('clients')
+        .insert([{ name: new_client_name.trim(), email: new_client_email.trim() }])
+        .select()
+        .single();
+      console.log('DEBUG: Client create result:', JSON.stringify(newClient), 'error:', createErr?.message);
+      if (createErr || !newClient) {
+        return NextResponse.json({ success: false, error: `Failed to create client: ${createErr?.message}` }, { status: 500 });
+      }
+      resolvedClientId = newClient.id;
       }
     } else {
       // Verify existing client
