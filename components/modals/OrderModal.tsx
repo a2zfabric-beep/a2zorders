@@ -310,9 +310,9 @@ export default function OrderModal({ isOpen, onClose }: { isOpen: boolean, onClo
           </div>
         </div>
 
-        <button type="submit" disabled={loading} className="w-full h-16 bg-blue-600 hover:bg-blue-700 text-white font-black text-sm rounded-[1.5rem] transition-all shadow-xl shadow-blue-600/20 uppercase tracking-[0.2em] disabled:opacity-50">
-          {loading ? 'CREATING ORDER...' : 'Confirm & Create Order'}
-        </button>
+        <button type="button" disabled={loading} onClick={handleSubmit} className="w-full h-16 bg-blue-600 hover:bg-blue-700 text-white font-black text-sm rounded-[1.5rem] transition-all shadow-xl shadow-blue-600/20 uppercase tracking-[0.2em] disabled:opacity-50">
+  {loading ? 'CREATING ORDER...' : 'Confirm & Create Order'}
+</button>
       </form>
     </Modal>
   );
