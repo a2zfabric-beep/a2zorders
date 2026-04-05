@@ -3,7 +3,7 @@ import { createClient as createSupabaseDirect } from '@supabase/supabase-js';
 
 // Initialize Supabase Direct to ensure environment variables are read correctly
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
 export async function GET() {
   try {
@@ -11,6 +11,7 @@ export async function GET() {
     const { data, error } = await supabase
       .from('clients')
       .select('*')
+      .eq('is_deleted', false)
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -36,6 +37,7 @@ export async function DELETE(request: Request) {
       .from('sample_orders')
       .select('id')
       .eq('client_id', id)
+      .eq('is_deleted', false)
       .limit(1);
 
     if (checkError) throw checkError;
@@ -63,3 +65,42 @@ export async function DELETE(request: Request) {
 }
 
 // Add POST/PATCH here if they exist in your file...
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+    const { name, email, company_name } = body;
+    if (!name || !email) {
+      return NextResponse.json({ success: false, error: 'Name and email are required' }, { status: 400 });
+    }
+    const supabase = createSupabaseDirect(supabaseUrl, supabaseKey);
+    const { data, error } = await supabase
+      .from('clients')
+      .insert([{ name, email, company_name: company_name || null }])
+      .select()
+      .single();
+    if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return NextResponse.json({ success: true, data });
+  } catch (err: any) {
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
+}
+
+export async function PUT(request: Request) {
+  try {
+    const body = await request.json();
+    const { id, name, email, company_name } = body;
+    if (!id) return NextResponse.json({ success: false, error: 'ID is required' }, { status: 400 });
+    const supabase = createSupabaseDirect(supabaseUrl, supabaseKey);
+    const { data, error } = await supabase
+      .from('clients')
+      .update({ name, email, company_name: company_name || null, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+    return NextResponse.json({ success: true, data });
+  } catch (err: any) {
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
+}
