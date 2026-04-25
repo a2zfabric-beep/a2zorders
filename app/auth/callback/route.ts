@@ -26,8 +26,13 @@ export async function GET(request: Request) {
         },
       }
     )
-    const { error } = await supabase.auth.exchangeCodeForSession(code)
-    if (!error) {
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code)
+    if (!error && data.session) {
+      const email = data.session.user.email
+      if (email !== 'a2zfabric@gmail.com') {
+        await supabase.auth.signOut()
+        return NextResponse.redirect(`${origin}/login?error=Access denied. Unauthorized account.`)
+      }
       return NextResponse.redirect(`${origin}${next}`)
     }
   }
