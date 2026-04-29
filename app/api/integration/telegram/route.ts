@@ -189,14 +189,24 @@ async function getStageDetail(supabase: any, orderId: string, stageId: number) {
     buttons.push([{ text: "▶️ Start Stage (Today)", callback_data: `wf_start_${orderId}_${stageId}` }]);
     buttons.push([{ text: "📅 Set Start Date", callback_data: `wf_prompt_date_${orderId}_${stageId}_start` }]);
     buttons.push([{ text: "⏱ Set Budget Days", callback_data: `wf_prompt_budget_${orderId}_${stageId}` }]);
+    if (stageId === 2 || stageId === 3 || stageId === 4) {
+      buttons.push([{ text: "⚪ NOT REQUIRED", callback_data: `wf_update_${orderId}_${stageId}_na` }]);
+    }
+  } else if (s.status === 'na') {
+    buttons.push([{ text: "↩️ Mark as Required (Reset)", callback_data: `wf_reset_${orderId}_${stageId}` }]);
   } else {
     buttons.push([{ text: "✅ Mark Completed (Today)", callback_data: `wf_update_${orderId}_${stageId}_completed` }]);
     buttons.push([{ text: "📅 Set Start Date", callback_data: `wf_prompt_date_${orderId}_${stageId}_start` }]);
     buttons.push([{ text: "🏁 Set Completion Date", callback_data: `wf_prompt_date_${orderId}_${stageId}_end` }]);
     buttons.push([{ text: "⏱ Set Budget Days", callback_data: `wf_prompt_budget_${orderId}_${stageId}` }]);
+    if (stageId === 2 || stageId === 3 || stageId === 4) {
+      buttons.push([{ text: "⚪ NOT REQUIRED", callback_data: `wf_update_${orderId}_${stageId}_na` }]);
+    }
   }
 
-  buttons.push([{ text: "🔄 Reset Stage", callback_data: `wf_reset_${orderId}_${stageId}` }]);
+  if (s.status !== 'na') {
+    buttons.push([{ text: "🔄 Reset Stage", callback_data: `wf_reset_${orderId}_${stageId}` }]);
+  }
   buttons.push([{ text: "⬅️ Back to Workflow Hub", callback_data: `wf_hub_${orderId}` }]);
   return { text, keyboard: { inline_keyboard: buttons } };
 }
@@ -655,10 +665,10 @@ export async function POST(request: Request) {
             stages[stageNum] = {
               ...stages[stageNum],
               status,
-              actualDate: status === 'completed' ? (stages[stageNum].actualDate || now) : stages[stageNum].actualDate,
-              startDate: stages[stageNum].startDate || now,
+              actualDate: status === 'completed' ? (stages[stageNum].actualDate || now) : (status === 'na' ? null : stages[stageNum].actualDate),
+              startDate: status === 'na' ? null : (stages[stageNum].startDate || now),
             };
-            if (status === 'completed' && stageNum < 5) {
+            if ((status === 'completed' || status === 'na') && stageNum < 5) {
                 if (!stages[stageNum + 1]) stages[stageNum + 1] = { status: 'in_progress', assignedDays: 0, startDate: now };
                 else { stages[stageNum + 1].status = 'in_progress'; stages[stageNum + 1].startDate = stages[stageNum + 1].startDate || now; }
             }
